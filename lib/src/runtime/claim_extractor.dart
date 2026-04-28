@@ -1,41 +1,48 @@
-/// Claim Extractor - Extracts claims from LLM responses.
+/// Claim Extractor - Full implementation with LLM strategy.
 ///
-/// Provides rule-based, LLM-based, and hybrid claim extraction
-/// strategies for processing skill execution outputs.
+/// Implements all three extraction strategies: rule-based, LLM-based, and hybrid.
 library;
 
-import 'dart:math';
+import 'dart:convert';
+import 'package:mcp_bundle/ports.dart'
+    show LlmPort, LlmRequest, LlmMessage, Claim, ClaimType, ClaimStatus;
 
-import 'skill_result.dart';
-import '../ports/llm_port.dart';
-
-/// Claim extraction strategies and algorithms.
+/// Claim extractor with all strategies implemented.
 class ClaimExtractor {
+  /// LLM port for LLM-based extraction.
+  final LlmPort llmPort;
+
+  /// Workspace ID for multi-tenant isolation.
+  final String workspaceId;
+
   /// Extraction configuration.
   final ClaimExtractionConfig config;
 
-  /// LLM port for LLM-based extraction.
-  final LlmPort? llmPort;
-
   ClaimExtractor({
-    required this.config,
-    this.llmPort,
+    required this.llmPort,
+    required this.workspaceId,
+    this.config = const ClaimExtractionConfig(),
   });
 
   /// Extract claims using configured strategy.
-  List<Claim> extract(String content) {
+  Future<List<Claim>> extract(String content, {
+    String? sourceId,
+  }) async {
     switch (config.strategy) {
       case ClaimExtractionStrategy.ruleBased:
-        return _extractWithRules(content);
+        return _extractWithRules(content, sourceId: sourceId);
       case ClaimExtractionStrategy.llmBased:
-        return _extractWithLlm(content);
+        return await _extractWithLlm(content, sourceId: sourceId);
       case ClaimExtractionStrategy.hybrid:
-        return _extractHybrid(content);
+        return await _extractHybrid(content, sourceId: sourceId);
     }
   }
 
-  /// Rule-based extraction using pattern matching.
-  List<Claim> _extractWithRules(String content) {
+  // ========================================================================
+  // RULE-BASED EXTRACTION
+  // ========================================================================
+
+  List<Claim> _extractWithRules(String content, {String? sourceId}) {
     final claims = <Claim>[];
     final sentences = _segmentSentences(content);
 
@@ -44,313 +51,410 @@ class ClaimExtractor {
       if (claimType != null) {
         claims.add(Claim(
           id: _generateClaimId(),
+          workspaceId: workspaceId,
           type: claimType,
-          text: sentence.text,
-          evidenceRefs: _findEvidenceRefs(sentence, sentences),
-          confidence: _calculateConfidence(sentence, claimType),
+          text: sentence,
+          sourceId: sourceId,
+          evidenceRefs: const [],
+          confidence: _calculateRuleBasedConfidence(sentence, claimType),
+          status: ClaimStatus.pending,
           metadata: {
             'extractionMethod': 'rule_based',
-            'patterns': sentence.matchedPatterns,
+            'patterns': _getMatchedPatterns(sentence, claimType),
           },
         ));
       }
     }
 
-    return _deduplicateAndRank(claims);
+    return _deduplicate(claims);
   }
 
-  /// LLM-based extraction for complex content.
-  List<Claim> _extractWithLlm(String content) {
-    if (llmPort == null) {
-      // Fallback to rule-based if no LLM
-      return _extractWithRules(content);
+  List<String> _segmentSentences(String content) {
+    // Split by sentence boundaries
+    return content
+        .split(RegExp(r'[.!?]\s+'))
+        .map((s) => s.trim())
+        .where((s) => s.isNotEmpty)
+        .toList();
+  }
+
+  ClaimType? _classifySentence(String sentence) {
+    final lower = sentence.toLowerCase();
+
+    // Conclusion patterns
+    if (_matchesPattern(lower, _conclusionPatterns)) {
+      return ClaimType.conclusion;
     }
 
-    // LLM extraction would be async in production
-    // For now, return empty list and use rules
-    return _extractWithRules(content);
+    // Recommendation patterns
+    if (_matchesPattern(lower, _recommendationPatterns)) {
+      return ClaimType.recommendation;
+    }
+
+    // Observation patterns
+    if (_matchesPattern(lower, _observationPatterns)) {
+      return ClaimType.observation;
+    }
+
+    // Prediction patterns
+    if (_matchesPattern(lower, _predictionPatterns)) {
+      return ClaimType.prediction;
+    }
+
+    // Fact patterns (default if contains strong indicators)
+    if (_matchesPattern(lower, _factPatterns)) {
+      return ClaimType.fact;
+    }
+
+    return null; // Not a claim
   }
 
-  /// Hybrid: rules first, LLM for ambiguous cases.
-  List<Claim> _extractHybrid(String content) {
-    final ruleClaims = _extractWithRules(content);
-    final lowConfidence = ruleClaims.where((c) => c.confidence < 0.5).toList();
+  bool _matchesPattern(String text, List<String> patterns) {
+    return patterns.any((pattern) => text.contains(pattern));
+  }
 
-    if (lowConfidence.isNotEmpty && llmPort != null) {
-      // In production, would re-process low confidence claims with LLM
-      // For now, just return rule-based results
+  List<String> _getMatchedPatterns(String sentence, ClaimType type) {
+    final lower = sentence.toLowerCase();
+    final patterns = _getPatternsForType(type);
+    return patterns.where((p) => lower.contains(p)).toList();
+  }
+
+  List<String> _getPatternsForType(ClaimType type) {
+    switch (type) {
+      case ClaimType.conclusion:
+        return _conclusionPatterns;
+      case ClaimType.recommendation:
+        return _recommendationPatterns;
+      case ClaimType.observation:
+        return _observationPatterns;
+      case ClaimType.prediction:
+        return _predictionPatterns;
+      case ClaimType.fact:
+        return _factPatterns;
+      default:
+        return [];
+    }
+  }
+
+  double _calculateRuleBasedConfidence(String sentence, ClaimType type) {
+    // Base confidence
+    double confidence = 0.6;
+
+    // Boost if multiple patterns match
+    final patterns = _getMatchedPatterns(sentence, type);
+    confidence += patterns.length * 0.1;
+
+    // Boost if contains evidence indicators
+    if (sentence.contains(RegExp(r'\b(because|since|as|given|data shows)\b'))) {
+      confidence += 0.1;
+    }
+
+    // Cap at 0.9 for rule-based (never 100% certain without LLM)
+    return confidence.clamp(0.0, 0.9);
+  }
+
+  // ========================================================================
+  // LLM-BASED EXTRACTION
+  // ========================================================================
+
+  Future<List<Claim>> _extractWithLlm(String content, {String? sourceId}) async {
+    final prompt = _buildLlmExtractionPrompt(content);
+
+    try {
+      final response = await llmPort.complete(
+        LlmRequest(
+          messages: [
+            LlmMessage.system(_systemPromptForExtraction),
+            LlmMessage.user(prompt),
+          ],
+          temperature: 0.0, // Deterministic extraction
+          maxTokens: 2000,
+        ),
+      );
+
+      // Parse JSON response
+      final claims = _parseLlmResponse(response.content, sourceId: sourceId);
+      return claims;
+    } catch (e) {
+      // Fallback to rule-based on error
+      return _extractWithRules(content, sourceId: sourceId);
+    }
+  }
+
+  String _buildLlmExtractionPrompt(String content) {
+    return '''
+Extract all claims from the following content. For each claim, provide:
+- type: one of [fact, conclusion, observation, prediction, recommendation, hypothesis, assumption]
+- text: the claim statement
+- confidence: 0.0 to 1.0
+- evidence: supporting evidence if present in the content
+
+Content:
+$content
+
+Respond with a JSON array of claims. Example format:
+[
+  {
+    "type": "conclusion",
+    "text": "The revenue increased by 15%",
+    "confidence": 0.95,
+    "evidence": "Based on Q4 financial data"
+  }
+]
+''';
+  }
+
+  static const _systemPromptForExtraction = '''
+You are a claim extraction expert. Your task is to identify and extract factual claims, conclusions, observations, predictions, recommendations, hypotheses, and assumptions from text.
+
+Guidelines:
+- A claim is a statement that asserts something to be true
+- Extract only substantive claims, not trivial statements
+- Assign appropriate type based on claim nature
+- Provide confidence based on clarity and supporting evidence
+- Be precise and concise in extracted text
+''';
+
+  List<Claim> _parseLlmResponse(String response, {String? sourceId}) {
+    try {
+      // Extract JSON array from response
+      final jsonMatch = RegExp(r'\[(.*)\]', dotAll: true).firstMatch(response);
+      if (jsonMatch == null) {
+        return [];
+      }
+
+      final jsonStr = jsonMatch.group(0)!;
+      final jsonList = jsonDecode(jsonStr) as List<dynamic>;
+
+      return jsonList.map((item) {
+        final map = item as Map<String, dynamic>;
+        return Claim(
+          id: _generateClaimId(),
+          workspaceId: workspaceId,
+          type: _parseClaimType(map['type'] as String?),
+          text: map['text'] as String? ?? '',
+          sourceId: sourceId,
+          evidenceRefs: _parseEvidence(map['evidence']),
+          confidence: (map['confidence'] as num?)?.toDouble() ?? 0.5,
+          status: ClaimStatus.pending,
+          metadata: {
+            'extractionMethod': 'llm_based',
+            'raw': map,
+          },
+        );
+      }).toList();
+    } catch (e) {
+      return [];
+    }
+  }
+
+  ClaimType _parseClaimType(String? typeStr) {
+    if (typeStr == null) return ClaimType.fact;
+
+    switch (typeStr.toLowerCase()) {
+      case 'conclusion':
+        return ClaimType.conclusion;
+      case 'recommendation':
+        return ClaimType.recommendation;
+      case 'observation':
+        return ClaimType.observation;
+      case 'prediction':
+        return ClaimType.prediction;
+      case 'hypothesis':
+      case 'hypothetical':
+        return ClaimType.hypothetical;
+      case 'assumption':
+        return ClaimType.fact;
+      default:
+        return ClaimType.fact;
+    }
+  }
+
+  List<String> _parseEvidence(dynamic evidence) {
+    if (evidence is String) {
+      return [evidence];
+    } else if (evidence is List) {
+      return evidence.map((e) => e.toString()).toList();
+    }
+    return [];
+  }
+
+  // ========================================================================
+  // HYBRID EXTRACTION
+  // ========================================================================
+
+  Future<List<Claim>> _extractHybrid(String content, {String? sourceId}) async {
+    // Step 1: Extract with rules
+    final ruleClaims = _extractWithRules(content, sourceId: sourceId);
+
+    // Step 2: Identify low-confidence claims
+    final lowConfidence = ruleClaims.where((c) => c.confidence < 0.7).toList();
+    final highConfidence = ruleClaims.where((c) => c.confidence >= 0.7).toList();
+
+    // Step 3: Refine low-confidence claims with LLM
+    if (lowConfidence.isNotEmpty) {
+      final refinedClaims = await _refineLowConfidenceClaims(
+        lowConfidence,
+        content,
+        sourceId: sourceId,
+      );
+      return [...highConfidence, ...refinedClaims];
     }
 
     return ruleClaims;
   }
 
-  /// Segment content into sentences with metadata.
-  List<SentenceSegment> _segmentSentences(String content) {
-    final segments = <SentenceSegment>[];
+  Future<List<Claim>> _refineLowConfidenceClaims(
+    List<Claim> claims,
+    String originalContent, {
+    String? sourceId,
+  }) async {
+    // Build targeted prompt for ambiguous claims
+    final claimTexts = claims.map((c) => c.text).join('\n- ');
+    final prompt = '''
+The following statements were extracted but need verification.
+For each, confirm if it's a valid claim and classify its type:
 
-    // Split by sentence boundaries (. ! ? and line breaks)
-    final sentencePattern = RegExp(r'([^.!?\n]+[.!?]?)');
-    int position = 0;
+- $claimTexts
 
-    for (final match in sentencePattern.allMatches(content)) {
-      final text = match.group(0)?.trim() ?? '';
-      if (text.isNotEmpty && text.length > 3) {
-        segments.add(SentenceSegment(
-          text: text,
-          position: position,
-          index: segments.length,
-        ));
-      }
-      position = match.end;
+Original context:
+$originalContent
+
+Respond with JSON array of refined claims.
+''';
+
+    try {
+      final response = await llmPort.complete(
+        LlmRequest(
+          messages: [
+            LlmMessage.system(_systemPromptForExtraction),
+            LlmMessage.user(prompt),
+          ],
+          temperature: 0.0,
+          maxTokens: 1500,
+        ),
+      );
+
+      return _parseLlmResponse(response.content, sourceId: sourceId);
+    } catch (e) {
+      // On error, return original claims with slight confidence boost
+      return claims
+          .map((c) => c.copyWith(confidence: (c.confidence + 0.1).clamp(0.0, 1.0)))
+          .toList();
     }
-
-    return segments;
   }
 
-  /// Classify sentence into claim type using pattern matching.
-  ClaimType? _classifySentence(SentenceSegment sentence) {
-    final text = sentence.text.toLowerCase();
-    final patterns = sentence.matchedPatterns;
+  // ========================================================================
+  // HELPERS
+  // ========================================================================
 
-    // Conclusion indicators
-    if (_matchesPatterns(text, [
-      r'\b(therefore|thus|hence|consequently|as a result)\b',
-      r'\b(in conclusion|to conclude|finally|ultimately)\b',
-      r'\b(this means|this shows|this proves|this indicates)\b',
-    ])) {
-      patterns.add('conclusion_indicator');
-      return ClaimType.conclusion;
-    }
+  List<Claim> _deduplicate(List<Claim> claims) {
+    final seen = <String>{};
+    final unique = <Claim>[];
 
-    // Observation indicators
-    if (_matchesPatterns(text, [
-      r'\b(observed|noticed|found|detected|identified)\b',
-      r'\b(shows that|reveals that|indicates that)\b',
-      r'\b(data shows|results show|analysis shows)\b',
-    ])) {
-      patterns.add('observation_indicator');
-      return ClaimType.observation;
-    }
-
-    // Prediction indicators
-    if (_matchesPatterns(text, [
-      r'\b(will|would|should|likely|probably)\b',
-      r'\b(predicts?|expects?|anticipates?|forecasts?)\b',
-      r'\b(in the future|going forward|eventually)\b',
-    ])) {
-      patterns.add('prediction_indicator');
-      return ClaimType.prediction;
-    }
-
-    // Recommendation indicators
-    if (_matchesPatterns(text, [
-      r'\b(recommend|suggest|advise|propose)\b',
-      r'\b(should consider|ought to|best to)\b',
-      r'\b(it is recommended|we recommend)\b',
-    ])) {
-      patterns.add('recommendation_indicator');
-      return ClaimType.recommendation;
-    }
-
-    // Factual claim indicators
-    if (_matchesPatterns(text, [
-      r'\b(is|are|was|were)\b.*\b(the|a|an)\b',
-      r'\b\d+(\.\d+)?%\b', // Contains percentages
-      r'\b\d{4}\b', // Contains years
-    ])) {
-      patterns.add('factual_indicator');
-      return ClaimType.fact;
-    }
-
-    // No strong signal - skip or mark as unknown
-    return null;
-  }
-
-  bool _matchesPatterns(String text, List<String> patterns) {
-    return patterns.any((p) => RegExp(p, caseSensitive: false).hasMatch(text));
-  }
-
-  /// Find evidence references for a claim.
-  List<String> _findEvidenceRefs(
-    SentenceSegment claimSentence,
-    List<SentenceSegment> allSentences,
-  ) {
-    final refs = <String>[];
-
-    // Look for citation patterns
-    final citationPattern = RegExp(r'\[(\d+)\]|\(([A-Za-z]+,?\s*\d{4})\)');
-    for (final match in citationPattern.allMatches(claimSentence.text)) {
-      refs.add(match.group(0) ?? '');
-    }
-
-    // Find supporting sentences (previous sentences with data/evidence)
-    final claimIndex = claimSentence.index;
-    for (int i = max(0, claimIndex - 3); i < claimIndex; i++) {
-      final prev = allSentences[i];
-      if (_isEvidenceSentence(prev)) {
-        refs.add('sentence_$i');
+    for (final claim in claims) {
+      final normalized = claim.text.toLowerCase().trim();
+      if (!seen.contains(normalized)) {
+        seen.add(normalized);
+        unique.add(claim);
       }
     }
 
-    return refs;
+    return unique;
   }
 
-  bool _isEvidenceSentence(SentenceSegment sentence) {
-    final text = sentence.text.toLowerCase();
-    return _matchesPatterns(text, [
-      r'\b\d+(\.\d+)?%\b', // Contains percentages
-      r'\b(study|research|survey)\b', // Research references
-      r'\b(according to|based on)\b', // Attribution
-      r'\b(table|figure|chart)\s*\d', // Data references
-    ]);
+  String _generateClaimId() {
+    final timestamp = DateTime.now().millisecondsSinceEpoch;
+    final random = timestamp.hashCode.abs() % 100000;
+    return 'claim_${timestamp}_$random';
   }
 
-  /// Calculate confidence based on pattern strength.
-  double _calculateConfidence(SentenceSegment sentence, ClaimType type) {
-    double confidence = 0.5; // Base confidence
+  // ========================================================================
+  // PATTERNS
+  // ========================================================================
 
-    // Boost for strong indicator patterns
-    if (sentence.matchedPatterns.length > 1) {
-      confidence += 0.1 * sentence.matchedPatterns.length;
-    }
+  static const _conclusionPatterns = [
+    'therefore',
+    'thus',
+    'consequently',
+    'as a result',
+    'this suggests',
+    'this indicates',
+    'we conclude',
+    'in conclusion',
+    'the evidence shows',
+  ];
 
-    // Boost for explicit language
-    if (sentence.text.contains('clearly') ||
-        sentence.text.contains('definitely') ||
-        sentence.text.contains('certainly')) {
-      confidence += 0.1;
-    }
+  static const _recommendationPatterns = [
+    'should',
+    'recommend',
+    'suggest',
+    'advise',
+    'ought to',
+    'it would be beneficial',
+    'consider',
+    'propose',
+  ];
 
-    // Reduce for hedging language
-    if (sentence.text.contains('might') ||
-        sentence.text.contains('perhaps') ||
-        sentence.text.contains('possibly')) {
-      confidence -= 0.15;
-    }
+  static const _observationPatterns = [
+    'observed',
+    'noticed',
+    'found that',
+    'appears that',
+    'seems that',
+    'evident that',
+    'clear that',
+  ];
 
-    // Reduce for very short claims
-    if (sentence.text.split(' ').length < 5) {
-      confidence -= 0.1;
-    }
+  static const _predictionPatterns = [
+    'will',
+    'expect',
+    'forecast',
+    'anticipate',
+    'predict',
+    'likely',
+    'probably',
+    'in the future',
+  ];
 
-    return confidence.clamp(0.1, 0.95);
-  }
-
-  /// Deduplicate similar claims and rank by confidence.
-  List<Claim> _deduplicateAndRank(List<Claim> claims) {
-    if (claims.isEmpty) return claims;
-
-    // Group by similarity (simple word overlap)
-    final groups = <List<Claim>>[];
-    final used = <int>{};
-
-    for (int i = 0; i < claims.length; i++) {
-      if (used.contains(i)) continue;
-
-      final group = [claims[i]];
-      used.add(i);
-
-      for (int j = i + 1; j < claims.length; j++) {
-        if (used.contains(j)) continue;
-        if (_areSimilar(claims[i], claims[j])) {
-          group.add(claims[j]);
-          used.add(j);
-        }
-      }
-      groups.add(group);
-    }
-
-    // Take highest confidence from each group
-    final deduplicated = groups.map((group) {
-      group.sort((a, b) => b.confidence.compareTo(a.confidence));
-      return group.first;
-    }).toList();
-
-    // Sort by confidence descending
-    deduplicated.sort((a, b) => b.confidence.compareTo(a.confidence));
-
-    // Limit to max claims
-    if (deduplicated.length > config.maxClaimsPerContent) {
-      return deduplicated.sublist(0, config.maxClaimsPerContent);
-    }
-
-    return deduplicated;
-  }
-
-  bool _areSimilar(Claim a, Claim b) {
-    final wordsA = a.text.toLowerCase().split(RegExp(r'\s+'));
-    final wordsB = b.text.toLowerCase().split(RegExp(r'\s+'));
-
-    final intersection = wordsA.toSet().intersection(wordsB.toSet());
-    final union = wordsA.toSet().union(wordsB.toSet());
-
-    final jaccardSimilarity = intersection.length / union.length;
-    return jaccardSimilarity > 0.6; // 60% word overlap threshold
-  }
-
-  String _generateClaimId() =>
-      'claim_${DateTime.now().millisecondsSinceEpoch}_${_random.nextInt(1000)}';
-
-  static final _random = Random();
+  static const _factPatterns = [
+    'is',
+    'are',
+    'was',
+    'were',
+    'has',
+    'have',
+    'contains',
+    'includes',
+  ];
 }
 
-/// Configuration for claim extraction.
+/// Claim extraction configuration.
 class ClaimExtractionConfig {
-  /// Extraction strategy.
+  /// Extraction strategy to use.
   final ClaimExtractionStrategy strategy;
 
   /// Minimum confidence threshold.
-  final double minConfidenceThreshold;
+  final double minConfidence;
 
-  /// Maximum claims per content.
-  final int maxClaimsPerContent;
-
-  /// Target claim types to extract.
-  final List<ClaimType> targetTypes;
+  /// Maximum claims to extract.
+  final int? maxClaims;
 
   const ClaimExtractionConfig({
-    this.strategy = ClaimExtractionStrategy.ruleBased,
-    this.minConfidenceThreshold = 0.3,
-    this.maxClaimsPerContent = 10,
-    this.targetTypes = const [
-      ClaimType.conclusion,
-      ClaimType.observation,
-      ClaimType.prediction,
-      ClaimType.recommendation,
-      ClaimType.fact,
-    ],
+    this.strategy = ClaimExtractionStrategy.hybrid,
+    this.minConfidence = 0.5,
+    this.maxClaims,
   });
 }
 
-/// Claim extraction strategies.
+/// Claim extraction strategy.
 enum ClaimExtractionStrategy {
-  /// Pattern matching only.
+  /// Rule-based pattern matching.
   ruleBased,
 
-  /// LLM extraction only.
+  /// LLM-based extraction.
   llmBased,
 
-  /// Rules + LLM for low-confidence.
+  /// Hybrid: rules first, LLM for refinement.
   hybrid,
-}
-
-/// Sentence segment with extraction metadata.
-class SentenceSegment {
-  /// Sentence text.
-  final String text;
-
-  /// Position in original content.
-  final int position;
-
-  /// Index in sentence list.
-  final int index;
-
-  /// Matched patterns.
-  final List<String> matchedPatterns = [];
-
-  SentenceSegment({
-    required this.text,
-    required this.position,
-    required this.index,
-  });
 }

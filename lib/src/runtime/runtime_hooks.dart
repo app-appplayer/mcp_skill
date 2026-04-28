@@ -1,360 +1,352 @@
-/// Runtime Hooks - Event handling for skill execution lifecycle.
+/// Runtime Hooks - Observability and lifecycle hooks for skill execution.
 ///
-/// Provides hooks for monitoring and extending skill execution
-/// including logging, metrics, and custom event handling.
+/// Implements the hook system for monitoring and extending runtime behavior.
 library;
 
 import 'skill_context.dart';
 import 'skill_result.dart';
-import 'procedure_executor.dart';
-import '../bundle/skill_bundle.dart';
 
-/// Hook for runtime events.
-///
-/// Implement this interface to receive notifications about
-/// skill execution lifecycle events.
+/// Runtime hook for observability and lifecycle events.
 abstract class RuntimeHook {
-  /// Called when skill execution starts.
-  Future<void> onSkillStart(SkillContext context, SkillBundle bundle);
+  /// Called before skill execution starts.
+  Future<void> beforeExecution(SkillContext context) async {}
 
-  /// Called when a step starts.
-  Future<void> onStepStart(ProcedureStep step);
+  /// Called after skill execution completes.
+  Future<void> afterExecution(
+      SkillContext context, SkillResult result) async {}
 
-  /// Called when a step completes successfully.
-  Future<void> onStepComplete(ProcedureStep step, StepResult result);
+  /// Called when routing phase starts.
+  Future<void> onRouting(SkillContext context) async {}
 
-  /// Called when skill execution completes.
-  Future<void> onSkillComplete(SkillResult result);
+  /// Called when context building phase starts.
+  Future<void> onContextBuilding(SkillContext context) async {}
+
+  /// Called when planning phase starts.
+  Future<void> onPlanning(SkillContext context, List<String> skillIds) async {}
+
+  /// Called when execution phase starts.
+  Future<void> onExecutionStart(SkillContext context) async {}
+
+  /// Called when validation phase starts.
+  Future<void> onValidation(SkillContext context) async {}
+
+  /// Called when persistence phase starts.
+  Future<void> onPersistence(SkillContext context) async {}
 
   /// Called when an error occurs.
-  Future<void> onError(Object error, StackTrace stackTrace);
+  Future<void> onError(
+      SkillContext context, Object error, StackTrace stackTrace) async {}
+
+  /// Called for non-fatal warnings.
+  Future<void> onWarning(SkillContext context, String message) async {}
+
+  /// Called when a step starts executing.
+  Future<void> onStepStart(
+      SkillContext context, String stepId, Map<String, dynamic> inputs) async {}
+
+  /// Called when a step completes.
+  Future<void> onStepComplete(
+      SkillContext context, String stepId, Map<String, dynamic> output) async {}
+
+  /// Called when a step fails.
+  Future<void> onStepFailure(
+      SkillContext context, String stepId, Object error) async {}
+
+  /// Called when budget is checked.
+  Future<void> onBudgetCheck(
+      SkillContext context, BudgetCheckResult result) async {}
+
+  /// Called when claims are extracted.
+  Future<void> onClaimsExtracted(
+      SkillContext context, List<dynamic> claims) async {}
 }
 
-/// Logging hook for runtime events.
-///
-/// Logs skill execution events. In production, would use a proper
-/// logging system instead of print statements.
-class LoggingHook implements RuntimeHook {
-  /// Log level.
-  final LogLevel level;
-
-  /// Custom logger callback.
-  final void Function(LogLevel level, String message)? logger;
+/// Logging hook - logs events to console/logger.
+class LoggingHook extends RuntimeHook {
+  final void Function(String level, String message) _logger;
+  final bool verbose;
 
   LoggingHook({
-    this.level = LogLevel.info,
-    this.logger,
-  });
+    required void Function(String level, String message) logger,
+    this.verbose = false,
+  }) : _logger = logger;
 
   @override
-  Future<void> onSkillStart(SkillContext context, SkillBundle bundle) async {
-    _log(LogLevel.info, 'Skill started: ${bundle.bundleId} - ${context.request}');
+  Future<void> beforeExecution(SkillContext context) async {
+    _logger('INFO',
+        '[${context.runId}] Starting execution for skill ${context.skillId}');
   }
 
   @override
-  Future<void> onStepStart(ProcedureStep step) async {
-    _log(LogLevel.debug, 'Step started: ${step.id} (${step.name})');
+  Future<void> afterExecution(
+      SkillContext context, SkillResult result) async {
+    final status = result.success ? 'SUCCESS' : 'FAILURE';
+    _logger('INFO',
+        '[${context.runId}] Execution completed: $status (${result.claims.length} claims)');
   }
 
   @override
-  Future<void> onStepComplete(ProcedureStep step, StepResult result) async {
-    _log(LogLevel.debug, 'Step completed: ${step.id} - claims: ${result.claims.length}');
+  Future<void> onError(
+      SkillContext context, Object error, StackTrace stackTrace) async {
+    _logger('ERROR', '[${context.runId}] Error: $error\n$stackTrace');
   }
 
   @override
-  Future<void> onSkillComplete(SkillResult result) async {
-    _log(
-      LogLevel.info,
-      'Skill completed: ${result.metadata.skillId} - confidence: ${result.confidence}',
-    );
+  Future<void> onWarning(SkillContext context, String message) async {
+    _logger('WARN', '[${context.runId}] Warning: $message');
   }
 
   @override
-  Future<void> onError(Object error, StackTrace stackTrace) async {
-    _log(LogLevel.error, 'Error: $error\n$stackTrace');
+  Future<void> onStepStart(SkillContext context, String stepId,
+      Map<String, dynamic> inputs) async {
+    if (verbose) {
+      _logger('DEBUG', '[${context.runId}] Step $stepId started');
+    }
   }
 
-  void _log(LogLevel logLevel, String message) {
-    if (logLevel.index >= level.index) {
-      if (logger != null) {
-        logger!(logLevel, message);
-      }
-      // Would use proper logging in production
+  @override
+  Future<void> onStepComplete(SkillContext context, String stepId,
+      Map<String, dynamic> output) async {
+    if (verbose) {
+      _logger('DEBUG', '[${context.runId}] Step $stepId completed');
     }
   }
 }
 
-/// Log levels.
-enum LogLevel {
-  debug,
-  info,
-  warning,
-  error,
-}
+/// Metrics hook - tracks performance metrics.
+class MetricsHook extends RuntimeHook {
+  final Map<String, List<Duration>> _durations = {};
+  final Map<String, int> _counters = {};
 
-/// Metrics hook for tracking execution statistics.
-class MetricsHook implements RuntimeHook {
-  /// Metrics collector callback.
-  final void Function(String metricName, double value, Map<String, String> tags)?
-      collector;
-
-  /// Tracked metrics.
-  final _metrics = <String, _MetricEntry>{};
-
-  MetricsHook({this.collector});
+  DateTime? _executionStart;
 
   @override
-  Future<void> onSkillStart(SkillContext context, SkillBundle bundle) async {
-    final key = '${bundle.bundleId}_${DateTime.now().millisecondsSinceEpoch}';
-    _metrics[key] = _MetricEntry(
-      skillId: bundle.bundleId,
-      startTime: DateTime.now(),
+  Future<void> beforeExecution(SkillContext context) async {
+    _executionStart = DateTime.now();
+    _incrementCounter('executions.started');
+  }
+
+  @override
+  Future<void> afterExecution(
+      SkillContext context, SkillResult result) async {
+    if (_executionStart != null) {
+      final duration = DateTime.now().difference(_executionStart!);
+      _recordDuration('execution.total', duration);
+    }
+
+    if (result.success) {
+      _incrementCounter('executions.succeeded');
+    } else {
+      _incrementCounter('executions.failed');
+    }
+
+    _incrementCounter('claims.extracted', result.claims.length);
+  }
+
+  @override
+  Future<void> onError(
+      SkillContext context, Object error, StackTrace stackTrace) async {
+    _incrementCounter('errors.total');
+    _incrementCounter('errors.${error.runtimeType}');
+  }
+
+  void _recordDuration(String metric, Duration duration) {
+    _durations.putIfAbsent(metric, () => []).add(duration);
+  }
+
+  void _incrementCounter(String metric, [int by = 1]) {
+    _counters[metric] = (_counters[metric] ?? 0) + by;
+  }
+
+  /// Get metrics summary.
+  Map<String, dynamic> getMetrics() {
+    final metrics = <String, dynamic>{};
+
+    // Counters
+    metrics['counters'] = Map<String, int>.from(_counters);
+
+    // Durations (with percentiles)
+    final durations = <String, dynamic>{};
+    for (final entry in _durations.entries) {
+      final sorted = List<Duration>.from(entry.value)
+        ..sort((a, b) => a.compareTo(b));
+      final count = sorted.length;
+
+      durations[entry.key] = {
+        'count': count,
+        'min': sorted.first.inMilliseconds,
+        'max': sorted.last.inMilliseconds,
+        'avg': sorted.map((d) => d.inMilliseconds).reduce((a, b) => a + b) ~/
+            count,
+        'p50': sorted[count ~/ 2].inMilliseconds,
+        'p95': sorted[(count * 0.95).toInt()].inMilliseconds,
+        'p99': sorted[(count * 0.99).toInt()].inMilliseconds,
+      };
+    }
+    metrics['durations'] = durations;
+
+    return metrics;
+  }
+
+  /// Reset all metrics.
+  void reset() {
+    _durations.clear();
+    _counters.clear();
+  }
+}
+
+/// Tracing hook - adds distributed tracing support.
+class TracingHook extends RuntimeHook {
+  final void Function(String traceId, String spanId, String name,
+      Map<String, dynamic> tags) _recordSpan;
+
+  String? _currentSpanId;
+
+  TracingHook({
+    required void Function(String traceId, String spanId, String name,
+            Map<String, dynamic> tags)
+        recordSpan,
+  }) : _recordSpan = recordSpan;
+
+  @override
+  Future<void> beforeExecution(SkillContext context) async {
+    _currentSpanId = _generateSpanId();
+    _recordSpan(
+      context.traceId,
+      _currentSpanId!,
+      'skill.execution',
+      {
+        'skill.id': context.skillId,
+        'run.id': context.runId,
+        'workspace.id': context.workspaceId,
+      },
     );
-    _emit('skill.started', 1, {'skill_id': bundle.bundleId});
   }
 
   @override
-  Future<void> onStepStart(ProcedureStep step) async {
-    _emit('step.started', 1, {'step_id': step.id, 'step_type': step.action.type});
-  }
-
-  @override
-  Future<void> onStepComplete(ProcedureStep step, StepResult result) async {
-    _emit('step.completed', 1, {
-      'step_id': step.id,
-      'claims_count': result.claims.length.toString(),
-    });
-  }
-
-  @override
-  Future<void> onSkillComplete(SkillResult result) async {
-    final entry = _metrics.values.firstWhere(
-      (e) => e.skillId == result.metadata.skillId,
-      orElse: () => _MetricEntry(skillId: result.metadata.skillId, startTime: DateTime.now()),
+  Future<void> onStepStart(SkillContext context, String stepId,
+      Map<String, dynamic> inputs) async {
+    final spanId = _generateSpanId();
+    _recordSpan(
+      context.traceId,
+      spanId,
+      'skill.step',
+      {
+        'step.id': stepId,
+        'parent.span.id': _currentSpanId,
+      },
     );
-
-    final duration = DateTime.now().difference(entry.startTime);
-
-    _emit('skill.completed', 1, {
-      'skill_id': result.metadata.skillId,
-      'confidence': result.confidence.toString(),
-    });
-    _emit('skill.duration_ms', duration.inMilliseconds.toDouble(), {
-      'skill_id': result.metadata.skillId,
-    });
-    _emit('skill.claims_count', result.claims.length.toDouble(), {
-      'skill_id': result.metadata.skillId,
-    });
-    _emit('skill.steps_count', result.metadata.stepsExecuted.toDouble(), {
-      'skill_id': result.metadata.skillId,
-    });
   }
 
-  @override
-  Future<void> onError(Object error, StackTrace stackTrace) async {
-    _emit('skill.error', 1, {'error_type': error.runtimeType.toString()});
-  }
-
-  void _emit(String name, double value, Map<String, String> tags) {
-    collector?.call(name, value, tags);
-  }
-
-  /// Get collected metrics summary.
-  Map<String, dynamic> getSummary() {
-    return {
-      'entries': _metrics.length,
-    };
+  String _generateSpanId() {
+    return DateTime.now().microsecondsSinceEpoch.toRadixString(16);
   }
 }
 
-class _MetricEntry {
-  final String skillId;
-  final DateTime startTime;
+/// Budget check result.
+class BudgetCheckResult {
+  final bool passed;
+  final String? reason;
+  final Map<String, dynamic> usage;
 
-  _MetricEntry({required this.skillId, required this.startTime});
+  const BudgetCheckResult({
+    required this.passed,
+    this.reason,
+    required this.usage,
+  });
 }
 
-/// Composite hook that delegates to multiple hooks.
-class CompositeHook implements RuntimeHook {
-  /// Inner hooks.
+/// Composite hook - combines multiple hooks.
+class CompositeHook extends RuntimeHook {
   final List<RuntimeHook> hooks;
 
   CompositeHook(this.hooks);
 
   @override
-  Future<void> onSkillStart(SkillContext context, SkillBundle bundle) async {
+  Future<void> beforeExecution(SkillContext context) async {
     for (final hook in hooks) {
-      await hook.onSkillStart(context, bundle);
+      await hook.beforeExecution(context);
     }
   }
 
   @override
-  Future<void> onStepStart(ProcedureStep step) async {
+  Future<void> afterExecution(
+      SkillContext context, SkillResult result) async {
     for (final hook in hooks) {
-      await hook.onStepStart(step);
+      await hook.afterExecution(context, result);
     }
   }
 
   @override
-  Future<void> onStepComplete(ProcedureStep step, StepResult result) async {
+  Future<void> onError(
+      SkillContext context, Object error, StackTrace stackTrace) async {
     for (final hook in hooks) {
-      await hook.onStepComplete(step, result);
+      await hook.onError(context, error, stackTrace);
     }
   }
 
   @override
-  Future<void> onSkillComplete(SkillResult result) async {
+  Future<void> onWarning(SkillContext context, String message) async {
     for (final hook in hooks) {
-      await hook.onSkillComplete(result);
+      await hook.onWarning(context, message);
     }
   }
 
   @override
-  Future<void> onError(Object error, StackTrace stackTrace) async {
+  Future<void> onStepStart(SkillContext context, String stepId,
+      Map<String, dynamic> inputs) async {
     for (final hook in hooks) {
-      await hook.onError(error, stackTrace);
+      await hook.onStepStart(context, stepId, inputs);
     }
   }
-}
-
-/// No-op hook that does nothing.
-class NoOpHook implements RuntimeHook {
-  const NoOpHook();
 
   @override
-  Future<void> onSkillStart(SkillContext context, SkillBundle bundle) async {}
-
-  @override
-  Future<void> onStepStart(ProcedureStep step) async {}
-
-  @override
-  Future<void> onStepComplete(ProcedureStep step, StepResult result) async {}
-
-  @override
-  Future<void> onSkillComplete(SkillResult result) async {}
-
-  @override
-  Future<void> onError(Object error, StackTrace stackTrace) async {}
-}
-
-/// Hook that records execution history.
-class HistoryHook implements RuntimeHook {
-  /// Maximum history entries to keep.
-  final int maxEntries;
-
-  /// Recorded history.
-  final List<HistoryEntry> _history = [];
-
-  HistoryHook({this.maxEntries = 1000});
-
-  /// Get recorded history.
-  List<HistoryEntry> get history => List.unmodifiable(_history);
-
-  /// Clear history.
-  void clear() => _history.clear();
-
-  @override
-  Future<void> onSkillStart(SkillContext context, SkillBundle bundle) async {
-    _record(HistoryEntry(
-      type: HistoryEntryType.skillStart,
-      timestamp: DateTime.now(),
-      data: {
-        'skillId': bundle.bundleId,
-        'request': context.request,
-      },
-    ));
-  }
-
-  @override
-  Future<void> onStepStart(ProcedureStep step) async {
-    _record(HistoryEntry(
-      type: HistoryEntryType.stepStart,
-      timestamp: DateTime.now(),
-      data: {
-        'stepId': step.id,
-        'stepName': step.name,
-        'actionType': step.action.type,
-      },
-    ));
-  }
-
-  @override
-  Future<void> onStepComplete(ProcedureStep step, StepResult result) async {
-    _record(HistoryEntry(
-      type: HistoryEntryType.stepComplete,
-      timestamp: DateTime.now(),
-      data: {
-        'stepId': step.id,
-        'claimsCount': result.claims.length,
-        'evidenceCount': result.evidenceRefs.length,
-      },
-    ));
-  }
-
-  @override
-  Future<void> onSkillComplete(SkillResult result) async {
-    _record(HistoryEntry(
-      type: HistoryEntryType.skillComplete,
-      timestamp: DateTime.now(),
-      data: {
-        'skillId': result.metadata.skillId,
-        'confidence': result.confidence,
-        'claimsCount': result.claims.length,
-        'durationMs': result.metadata.duration.inMilliseconds,
-      },
-    ));
-  }
-
-  @override
-  Future<void> onError(Object error, StackTrace stackTrace) async {
-    _record(HistoryEntry(
-      type: HistoryEntryType.error,
-      timestamp: DateTime.now(),
-      data: {
-        'error': error.toString(),
-        'stackTrace': stackTrace.toString(),
-      },
-    ));
-  }
-
-  void _record(HistoryEntry entry) {
-    _history.add(entry);
-    while (_history.length > maxEntries) {
-      _history.removeAt(0);
+  Future<void> onStepComplete(SkillContext context, String stepId,
+      Map<String, dynamic> output) async {
+    for (final hook in hooks) {
+      await hook.onStepComplete(context, stepId, output);
     }
   }
-}
 
-/// History entry.
-class HistoryEntry {
-  /// Entry type.
-  final HistoryEntryType type;
+  @override
+  Future<void> onRouting(SkillContext context) async {
+    for (final hook in hooks) {
+      await hook.onRouting(context);
+    }
+  }
 
-  /// Timestamp.
-  final DateTime timestamp;
+  @override
+  Future<void> onContextBuilding(SkillContext context) async {
+    for (final hook in hooks) {
+      await hook.onContextBuilding(context);
+    }
+  }
 
-  /// Entry data.
-  final Map<String, dynamic> data;
+  @override
+  Future<void> onPlanning(SkillContext context, List<String> skillIds) async {
+    for (final hook in hooks) {
+      await hook.onPlanning(context, skillIds);
+    }
+  }
 
-  const HistoryEntry({
-    required this.type,
-    required this.timestamp,
-    required this.data,
-  });
+  @override
+  Future<void> onExecutionStart(SkillContext context) async {
+    for (final hook in hooks) {
+      await hook.onExecutionStart(context);
+    }
+  }
 
-  /// Convert to JSON.
-  Map<String, dynamic> toJson() => {
-        'type': type.name,
-        'timestamp': timestamp.toIso8601String(),
-        'data': data,
-      };
-}
+  @override
+  Future<void> onValidation(SkillContext context) async {
+    for (final hook in hooks) {
+      await hook.onValidation(context);
+    }
+  }
 
-/// History entry types.
-enum HistoryEntryType {
-  skillStart,
-  stepStart,
-  stepComplete,
-  skillComplete,
-  error,
+  @override
+  Future<void> onPersistence(SkillContext context) async {
+    for (final hook in hooks) {
+      await hook.onPersistence(context);
+    }
+  }
 }

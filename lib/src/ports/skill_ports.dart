@@ -1,56 +1,126 @@
-/// Skill Ports Container - Container for all port implementations.
+/// Skill Ports container — composition root for skill execution.
 ///
-/// Provides a unified container for all ports required by skill execution.
+/// Per REDESIGN-PLAN §3.4, `SkillPorts` now aggregates capability-named
+/// standard ports defined in `mcp_bundle` instead of the monolithic
+/// `SkillFactGraphPort`. `LlmPort` and `McpPort` are required; all
+/// fact-graph-backed capabilities are optional so that scenario B
+/// (Skill + LLM + MCP only) remains composable without RAG.
 library;
 
-import 'llm_port.dart';
-import 'mcp_port.dart';
-import 'knowledge_port.dart';
-import 'fact_graph_port.dart';
+import 'package:mcp_bundle/mcp_bundle.dart'
+    show
+        LlmPort,
+        StubLlmPort,
+        McpPort,
+        StubMcpPort,
+        FactsPort,
+        StubFactsPort,
+        ClaimsPort,
+        StubClaimsPort,
+        RunsPort,
+        StubRunsPort,
+        ContextBundlePort,
+        StubContextBundlePort,
+        RetrievalPort,
+        StubRetrievalPort,
+        AssetPort,
+        StubAssetPort;
 
-/// Container for all port implementations.
+export 'package:mcp_bundle/mcp_bundle.dart'
+    show
+        LlmPort,
+        StubLlmPort,
+        McpPort,
+        StubMcpPort,
+        FactsPort,
+        StubFactsPort,
+        ClaimsPort,
+        StubClaimsPort,
+        RunsPort,
+        StubRunsPort,
+        ContextBundlePort,
+        StubContextBundlePort,
+        RetrievalPort,
+        StubRetrievalPort,
+        AssetPort,
+        StubAssetPort;
+
+/// Container for the ports required by `SkillRuntime` and friends.
+///
+/// `llm` and `mcp` are the minimum required capabilities. The remaining
+/// ports are optional so hosts can construct a runtime with only the
+/// capabilities they need. See REDESIGN-PLAN §3.4 Open Question 7 for
+/// the rationale behind the flat (versus composite) shape.
 class SkillPorts {
-  /// LLM port for LLM interactions.
+  /// LLM invocation port (required).
   final LlmPort llm;
 
-  /// MCP port for MCP tool/resource access.
+  /// MCP tool/resource port (required).
   final McpPort mcp;
 
-  /// Knowledge port for RAG operations.
-  final KnowledgePort knowledge;
+  /// Facts CRUD port (optional).
+  final FactsPort? facts;
 
-  /// FactGraph port for graph operations (optional).
-  final FactGraphPort? factGraph;
+  /// Claims CRUD and validation port (optional).
+  final ClaimsPort? claims;
+
+  /// Run record persistence port (optional).
+  final RunsPort? runs;
+
+  /// Context bundle assembly port (optional).
+  final ContextBundlePort? contextBundle;
+
+  /// Knowledge retrieval (RAG) port (optional).
+  final RetrievalPort? retrieval;
+
+  /// Binary asset retrieval port (optional).
+  final AssetPort? asset;
 
   const SkillPorts({
     required this.llm,
     required this.mcp,
-    required this.knowledge,
-    this.factGraph,
+    this.facts,
+    this.claims,
+    this.runs,
+    this.contextBundle,
+    this.retrieval,
+    this.asset,
   });
 
-  /// Create with stub implementations.
+  /// Test-only stub factory that wires every port to its in-memory stub.
   factory SkillPorts.stub() {
-    return const SkillPorts(
+    return SkillPorts(
       llm: StubLlmPort(),
-      mcp: StubMcpPort(),
-      knowledge: EmptyKnowledgePort(),
-      factGraph: null,
+      mcp: const StubMcpPort(),
+      facts: const StubFactsPort(),
+      claims: const StubClaimsPort(),
+      runs: const StubRunsPort(),
+      contextBundle: const StubContextBundlePort(),
+      retrieval: const StubRetrievalPort(),
+      asset: const StubAssetPort(),
     );
   }
 
-  /// Create a copy with some ports replaced.
+  /// Return a copy with the supplied fields replaced.
   SkillPorts copyWith({
     LlmPort? llm,
     McpPort? mcp,
-    KnowledgePort? knowledge,
-    FactGraphPort? factGraph,
+    FactsPort? facts,
+    ClaimsPort? claims,
+    RunsPort? runs,
+    ContextBundlePort? contextBundle,
+    RetrievalPort? retrieval,
+    AssetPort? asset,
   }) {
     return SkillPorts(
       llm: llm ?? this.llm,
       mcp: mcp ?? this.mcp,
-      knowledge: knowledge ?? this.knowledge,
-      factGraph: factGraph ?? this.factGraph,
+      facts: facts ?? this.facts,
+      claims: claims ?? this.claims,
+      runs: runs ?? this.runs,
+      contextBundle: contextBundle ?? this.contextBundle,
+      retrieval: retrieval ?? this.retrieval,
+      asset: asset ?? this.asset,
     );
   }
 }

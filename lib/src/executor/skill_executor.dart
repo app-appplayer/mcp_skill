@@ -174,12 +174,7 @@ class SkillExecutor {
       case StepType.wait:
         return _executeWait(step, context);
 
-      case StepType.condition:
-      case StepType.loop:
-      case StepType.parallel:
-      case StepType.call:
-      case StepType.http:
-      case StepType.unknown:
+      default:
         throw ExecutionException('Step type ${step.type.name} not implemented');
     }
   }

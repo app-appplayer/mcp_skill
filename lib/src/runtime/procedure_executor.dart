@@ -45,10 +45,23 @@ class ProcedureExecutor {
     final sortedSteps = procedure.steps.toList()
       ..sort((a, b) => a.order.compareTo(b.order));
 
+    // Build a budget tracker when the context carries a budget. Enforcement
+    // happens per step by calling `assertNotExpired` and `incrementStep`.
+    final budgetTracker =
+        context.budget != null ? BudgetTracker(context.budget!) : null;
+
     String? nextStepId;
     for (final step in sortedSteps) {
       // Skip if not the next step in flow
       if (nextStepId != null && step.id != nextStepId) continue;
+
+      // Enforce budget before entering a step. `assertNotExpired` throws
+      // BudgetExceededException when the wall-clock budget is exhausted;
+      // `incrementStep` throws when step count would exceed the budget.
+      if (budgetTracker != null) {
+        budgetTracker.assertNotExpired();
+        budgetTracker.incrementStep();
+      }
 
       // Check condition
       if (step.condition != null) {

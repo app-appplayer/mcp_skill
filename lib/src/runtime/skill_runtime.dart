@@ -1,305 +1,477 @@
-/// Skill Runtime - Runtime management for skill execution.
+/// Skill Runtime - Main runtime for executing skills.
 ///
-/// Provides runtime services for managing skill execution lifecycle.
+/// Implements the 7-step execution pipeline as specified in design docs.
 library;
 
-import '../definition/skill.dart';
-import '../executor/skill_executor.dart';
-import '../ports/skill_port.dart';
-import '../bundle/skill_bundle.dart';
+import 'package:mcp_bundle/mcp_bundle.dart' show RunRecord, RunStatus;
+import 'package:mcp_bundle/src/ports/context_bundle_port.dart'
+    show ContextBundleRequest, ContextBudget;
 
-/// Runtime for skill execution.
+import '../registry/skill_registry.dart';
+import '../ports/skill_ports.dart';
+import '../exceptions/load_exceptions.dart';
+import 'skill_router.dart';
+import 'skill_context.dart';
+import 'skill_result.dart';
+import 'procedure_executor.dart';
+import 'runtime_hooks.dart';
+
+/// Main runtime for executing skills.
+///
+/// Execution Pipeline (7 steps):
+/// 1. Route: Select skill(s) to execute
+/// 2. Build Context: Get FactGraph context if available
+/// 3. Plan: Determine execution strategy
+/// 4. Execute: Run procedures
+/// 5. Validate: Check results against validators
+/// 6. Persist: Write to FactGraph if available
+/// 7. Return: Aggregate and return
 class SkillRuntime {
-  /// Skill storage port.
-  final SkillStoragePort? _storage;
+  /// Skill registry for looking up skills.
+  final SkillBundleRegistry registry;
 
-  /// Skill executor.
-  final SkillExecutor _executor;
+  /// Ports for external system access.
+  final SkillPorts ports;
 
-  /// Active executions.
-  final Map<String, SkillExecution> _activeExecutions = {};
+  /// Router for skill selection (optional).
+  final SkillRouter? router;
 
-  /// Execution history.
-  final List<ExecutionRecord> _history = [];
-
-  /// Maximum history size.
-  final int maxHistorySize;
+  /// Hooks for observability (optional).
+  final List<RuntimeHook>? hooks;
 
   SkillRuntime({
-    SkillStoragePort? storage,
-    SkillExecutor? executor,
-    this.maxHistorySize = 1000,
-  })  : _storage = storage,
-        _executor = executor ?? SkillExecutor();
+    required this.registry,
+    required this.ports,
+    this.router,
+    this.hooks,
+  });
 
-  /// Load skills from bundle.
-  Future<void> loadBundle(SkillBundle bundle) async {
-    if (_storage == null) return;
-
-    for (final skill in bundle.skills) {
-      await _storage!.saveSkill(skill);
-    }
-  }
-
-  /// Execute a skill by ID.
-  Future<SkillExecutionResult> execute(
-    String skillId,
-    Map<String, dynamic> inputs, {
-    String? executionId,
-  }) async {
-    final skill = await _getSkill(skillId);
-    if (skill == null) {
-      return SkillExecutionResult.failure(
-        executionId: executionId ?? _generateId(),
-        skillId: skillId,
-        error: 'Skill not found: $skillId',
-        duration: Duration.zero,
-      );
-    }
-
-    return executeSkill(skill, inputs, executionId: executionId);
-  }
-
-  /// Execute a skill directly.
-  Future<SkillExecutionResult> executeSkill(
-    Skill skill,
-    Map<String, dynamic> inputs, {
-    String? executionId,
-  }) async {
-    final execId = executionId ?? _generateId();
-    final startTime = DateTime.now();
-
-    // Create execution record
-    final execution = SkillExecution(
-      executionId: execId,
-      skillId: skill.id,
-      inputs: inputs,
-      startedAt: startTime,
-      status: ExecutionStatus.running,
-    );
-    _activeExecutions[execId] = execution;
+  /// Execute a skill based on context.
+  ///
+  /// This is the main entry point that implements the 7-step pipeline.
+  Future<SkillResult> run(SkillContext context) async {
+    await _notifyHooks((hook) => hook.beforeExecution(context));
 
     try {
-      // Execute skill
-      final result = await _executor.execute(skill, inputs);
+      // Step 1: Route - Select skill(s) to execute
+      final selectedSkills = await _route(context);
 
-      final duration = DateTime.now().difference(startTime);
+      // Step 2: Build Context - Get FactGraph context if available
+      final enrichedContext = await _buildContext(context);
 
-      // Create result
-      final execResult = result.success
-          ? SkillExecutionResult.success(
-              executionId: execId,
-              skillId: skill.id,
-              output: result.output,
-              duration: duration,
-              stepResults: result.stepResults,
-            )
-          : SkillExecutionResult.failure(
-              executionId: execId,
-              skillId: skill.id,
-              error: result.error ?? 'Unknown error',
-              duration: duration,
-              stepResults: result.stepResults,
-            );
+      // Step 3: Plan - Determine execution strategy
+      final plan = await _plan(selectedSkills, enrichedContext);
 
-      // Record history
-      _recordExecution(execution.copyWith(
-        status: result.success
-            ? ExecutionStatus.completed
-            : ExecutionStatus.failed,
-        completedAt: DateTime.now(),
-        result: execResult,
-      ));
+      // Step 4: Execute - Run procedures
+      final rawResults = await _execute(plan, enrichedContext);
 
-      return execResult;
-    } catch (e) {
-      final duration = DateTime.now().difference(startTime);
+      // Step 5: Validate - Check results against validators
+      final validatedResults = await _validate(rawResults, enrichedContext);
 
-      final execResult = SkillExecutionResult.failure(
-        executionId: execId,
-        skillId: skill.id,
-        error: e.toString(),
-        duration: duration,
+      // Step 6: Persist - Write to FactGraph if available
+      await _persist(validatedResults, enrichedContext);
+
+      // Step 7: Return - Aggregate and return
+      final finalResult = _aggregate(validatedResults);
+
+      await _notifyHooks((hook) => hook.afterExecution(context, finalResult));
+
+      return finalResult;
+    } catch (e, stackTrace) {
+      await _notifyHooks((hook) => hook.onError(context, e, stackTrace));
+      rethrow;
+    }
+  }
+
+  /// Execute a specific procedure directly.
+  Future<SkillResult> runProcedure(
+    String skillId,
+    String procedureId,
+    SkillContext context,
+  ) async {
+    final bundle = await registry.getSkill(skillId);
+    if (bundle == null) {
+      throw SkillNotFoundException(skillId);
+    }
+
+    final defProc = bundle.procedures.firstOrNull;
+    if (defProc == null) {
+      throw ProcedureNotFoundException(skillId, procedureId);
+    }
+
+    // Convert definition Procedure to runtime Procedure
+    final procedure = Procedure.fromJson(defProc.toJson());
+    final executor = ProcedureExecutor(ports: ports);
+    return await executor.execute(procedure, context);
+  }
+
+  // ========================================================================
+  // STEP 1: ROUTE
+  // ========================================================================
+
+  /// Route: Select skill(s) to execute based on context.
+  Future<List<String>> _route(SkillContext context) async {
+    await _notifyHooks((hook) => hook.onRouting(context));
+
+    // If skills explicitly specified, use those
+    if (context.activeSkills != null && context.activeSkills!.isNotEmpty) {
+      return context.activeSkills!;
+    }
+
+    // Otherwise use router
+    if (router != null) {
+      final routedSkills = await router!.route(context);
+      return routedSkills;
+    }
+
+    // Fallback: try to infer from skillId in context
+    if (context.skillId.isNotEmpty) {
+      return [context.skillId];
+    }
+
+    throw SkillRoutingException('No skills selected and no router configured');
+  }
+
+  // ========================================================================
+  // STEP 2: BUILD CONTEXT
+  // ========================================================================
+
+  /// Build Context: Enrich context via [ContextBundlePort] if present.
+  Future<SkillContext> _buildContext(SkillContext context) async {
+    await _notifyHooks((hook) => hook.onContextBuilding(context));
+
+    // Skip when a context bundle has already been built upstream.
+    if (context.contextBundle != null) {
+      return context;
+    }
+
+    // Scenario B (Skill + LLM + MCP only) — no context bundle port wired.
+    final contextBundlePort = ports.contextBundle;
+    if (contextBundlePort == null) {
+      return context;
+    }
+
+    try {
+      final request = ContextBundleRequest(
+        workspaceId: context.workspaceId,
+        query: context.request,
+        asOf: context.asOf,
+        period: context.period,
+        policyVersion: context.policyVersion,
+        budget: ContextBudget(
+          maxTokens: context.budget?.maxTokens ?? 20000,
+          maxNodes: 500,
+        ),
       );
 
-      _recordExecution(execution.copyWith(
-        status: ExecutionStatus.failed,
-        completedAt: DateTime.now(),
-        error: e.toString(),
-      ));
-
-      return execResult;
-    } finally {
-      _activeExecutions.remove(execId);
+      final bundle = await contextBundlePort.buildContextBundle(request);
+      return context.copyWith(contextBundle: bundle);
+    } catch (e) {
+      await _notifyHooks(
+        (hook) => hook.onWarning(context, 'Context bundle build failed: $e'),
+      );
+      return context;
     }
   }
 
-  /// Get active executions.
-  List<SkillExecution> get activeExecutions => _activeExecutions.values.toList();
+  // ========================================================================
+  // STEP 3: PLAN
+  // ========================================================================
 
-  /// Get execution history.
-  List<ExecutionRecord> get history => List.unmodifiable(_history);
+  /// Plan: Determine execution strategy.
+  ///
+  /// The strategy is resolved in this precedence order:
+  /// 1. `context.metadata['plan_strategy']` — explicit host override.
+  /// 2. The first selected skill's `metadata['plan_strategy']` — skill
+  ///    authors may declare a preferred strategy.
+  /// 3. Default: [ExecutionStrategy.sequential] (legacy behavior).
+  Future<ExecutionPlan> _plan(
+      List<String> skillIds, SkillContext context) async {
+    await _notifyHooks((hook) => hook.onPlanning(context, skillIds));
 
-  /// Get execution by ID.
-  SkillExecution? getExecution(String executionId) {
-    return _activeExecutions[executionId];
-  }
+    final strategy = await _resolveStrategy(skillIds, context);
 
-  /// Cancel execution.
-  Future<bool> cancel(String executionId) async {
-    final execution = _activeExecutions[executionId];
-    if (execution == null) return false;
-
-    _activeExecutions.remove(executionId);
-    _recordExecution(execution.copyWith(
-      status: ExecutionStatus.cancelled,
-      completedAt: DateTime.now(),
-    ));
-
-    return true;
-  }
-
-  /// Clear history.
-  void clearHistory() {
-    _history.clear();
-  }
-
-  Future<Skill?> _getSkill(String skillId) async {
-    return _storage?.getSkill(skillId);
-  }
-
-  void _recordExecution(SkillExecution execution) {
-    _history.add(ExecutionRecord(
-      executionId: execution.executionId,
-      skillId: execution.skillId,
-      status: execution.status,
-      startedAt: execution.startedAt,
-      completedAt: execution.completedAt,
-      duration: execution.completedAt?.difference(execution.startedAt),
-      error: execution.error,
-    ));
-
-    // Trim history
-    while (_history.length > maxHistorySize) {
-      _history.removeAt(0);
-    }
-  }
-
-  String _generateId() {
-    final timestamp = DateTime.now().millisecondsSinceEpoch;
-    final random = timestamp.hashCode.abs() % 10000;
-    return 'exec_${timestamp}_$random';
-  }
-}
-
-/// Active skill execution.
-class SkillExecution {
-  /// Execution ID.
-  final String executionId;
-
-  /// Skill ID.
-  final String skillId;
-
-  /// Input values.
-  final Map<String, dynamic> inputs;
-
-  /// When execution started.
-  final DateTime startedAt;
-
-  /// When execution completed.
-  final DateTime? completedAt;
-
-  /// Execution status.
-  final ExecutionStatus status;
-
-  /// Execution result.
-  final SkillExecutionResult? result;
-
-  /// Error message.
-  final String? error;
-
-  const SkillExecution({
-    required this.executionId,
-    required this.skillId,
-    required this.inputs,
-    required this.startedAt,
-    this.completedAt,
-    required this.status,
-    this.result,
-    this.error,
-  });
-
-  SkillExecution copyWith({
-    String? executionId,
-    String? skillId,
-    Map<String, dynamic>? inputs,
-    DateTime? startedAt,
-    DateTime? completedAt,
-    ExecutionStatus? status,
-    SkillExecutionResult? result,
-    String? error,
-  }) {
-    return SkillExecution(
-      executionId: executionId ?? this.executionId,
-      skillId: skillId ?? this.skillId,
-      inputs: inputs ?? this.inputs,
-      startedAt: startedAt ?? this.startedAt,
-      completedAt: completedAt ?? this.completedAt,
-      status: status ?? this.status,
-      result: result ?? this.result,
-      error: error ?? this.error,
+    return ExecutionPlan(
+      skillIds: skillIds,
+      strategy: strategy,
     );
   }
+
+  /// Resolve [ExecutionStrategy] from context or skill metadata.
+  Future<ExecutionStrategy> _resolveStrategy(
+      List<String> skillIds, SkillContext context) async {
+    final ctxRaw = context.metadata?['plan_strategy'];
+    final ctxStrategy = _parseStrategy(ctxRaw);
+    if (ctxStrategy != null) return ctxStrategy;
+
+    if (skillIds.isNotEmpty) {
+      final bundle = await registry.getSkill(skillIds.first);
+      if (bundle != null) {
+        final raw = bundle.extensions?['plan_strategy'];
+        final parsed = _parseStrategy(raw);
+        if (parsed != null) return parsed;
+      }
+    }
+
+    return ExecutionStrategy.sequential;
+  }
+
+  /// Parse a strategy string into an [ExecutionStrategy]. Returns null when
+  /// the value is missing or unrecognized so the caller can fall through to
+  /// the next precedence level.
+  ExecutionStrategy? _parseStrategy(Object? raw) {
+    if (raw is! String) return null;
+    switch (raw.toLowerCase()) {
+      case 'sequential':
+        return ExecutionStrategy.sequential;
+      case 'parallel':
+        return ExecutionStrategy.parallel;
+      case 'fallback':
+        return ExecutionStrategy.fallback;
+      default:
+        return null;
+    }
+  }
+
+  // ========================================================================
+  // STEP 4: EXECUTE
+  // ========================================================================
+
+  /// Execute: Run procedures for selected skills.
+  ///
+  /// Dispatches to the concrete executor per [ExecutionPlan.strategy]:
+  /// - [ExecutionStrategy.sequential] runs skills one-by-one (default).
+  /// - [ExecutionStrategy.parallel] runs every skill concurrently with
+  ///   `Future.wait`; any skill throwing propagates to the caller.
+  /// - [ExecutionStrategy.fallback] runs skills sequentially and returns
+  ///   at the first successful result; if all fail, the last error is
+  ///   rethrown.
+  Future<List<SkillResult>> _execute(
+      ExecutionPlan plan, SkillContext context) async {
+    await _notifyHooks((hook) => hook.onExecutionStart(context));
+
+    switch (plan.strategy) {
+      case ExecutionStrategy.sequential:
+        return _executeSequential(plan, context);
+      case ExecutionStrategy.parallel:
+        return _executeParallel(plan, context);
+      case ExecutionStrategy.fallback:
+        return _executeFallback(plan, context);
+    }
+  }
+
+  /// Sequential execution: run skills in order, capturing failures as
+  /// failure [SkillResult]s (preserves legacy behavior).
+  Future<List<SkillResult>> _executeSequential(
+      ExecutionPlan plan, SkillContext context) async {
+    final results = <SkillResult>[];
+    for (final skillId in plan.skillIds) {
+      results.add(await _runSkill(skillId, context));
+    }
+    return results;
+  }
+
+  /// Parallel execution: all skills run concurrently. Any thrown exception
+  /// surfaces to the caller. Non-throwing failures (missing skill, missing
+  /// procedure, handled errors) remain in the result list.
+  Future<List<SkillResult>> _executeParallel(
+      ExecutionPlan plan, SkillContext context) async {
+    if (plan.skillIds.isEmpty) return const <SkillResult>[];
+    final futures = plan.skillIds
+        .map((skillId) => _runSkill(skillId, context, rethrowOnError: true))
+        .toList();
+    return await Future.wait(futures, eagerError: true);
+  }
+
+  /// Fallback execution: sequential attempts, return the first skill whose
+  /// procedure executes without throwing. If every attempt throws, rethrow
+  /// the most recent exception preserving its original stack trace.
+  Future<List<SkillResult>> _executeFallback(
+      ExecutionPlan plan, SkillContext context) async {
+    if (plan.skillIds.isEmpty) return const <SkillResult>[];
+
+    Object? lastError;
+    StackTrace? lastStack;
+
+    for (final skillId in plan.skillIds) {
+      try {
+        final result = await _runSkill(skillId, context, rethrowOnError: true);
+        return [result];
+      } catch (e, stackTrace) {
+        lastError = e;
+        lastStack = stackTrace;
+      }
+    }
+
+    // All attempts threw — re-throw the last captured error.
+    Error.throwWithStackTrace(
+      lastError ?? StateError('Fallback exhausted with no recorded error'),
+      lastStack ?? StackTrace.current,
+    );
+  }
+
+  /// Run a single skill, translating missing skills/procedures into failure
+  /// [SkillResult]s. When [rethrowOnError] is true, exceptions raised by the
+  /// procedure executor propagate to the caller instead of being wrapped in
+  /// a failure result.
+  Future<SkillResult> _runSkill(
+    String skillId,
+    SkillContext context, {
+    bool rethrowOnError = false,
+  }) async {
+    final bundle = await registry.getSkill(skillId);
+    if (bundle == null) {
+      return SkillResult.failure(
+        skillId: skillId,
+        error: 'Skill not found: $skillId',
+      );
+    }
+
+    final defProc = bundle.procedures.firstOrNull;
+    if (defProc == null) {
+      return SkillResult.failure(
+        skillId: skillId,
+        error: 'No procedures found in skill',
+      );
+    }
+
+    try {
+      final procedure = Procedure.fromJson(defProc.toJson());
+      final executor = ProcedureExecutor(ports: ports);
+      return await executor.execute(procedure, context);
+    } catch (e, stackTrace) {
+      await _notifyHooks((hook) => hook.onError(context, e, stackTrace));
+      if (rethrowOnError) rethrow;
+      return SkillResult.failure(
+        skillId: skillId,
+        error: e.toString(),
+      );
+    }
+  }
+
+  // ========================================================================
+  // STEP 5: VALIDATE
+  // ========================================================================
+
+  /// Validate: Check results against validators.
+  Future<List<SkillResult>> _validate(
+      List<SkillResult> results, SkillContext context) async {
+    await _notifyHooks((hook) => hook.onValidation(context));
+
+    // Validation is handled by quality gates in ProcedureExecutor
+    return results;
+  }
+
+  // ========================================================================
+  // STEP 6: PERSIST
+  // ========================================================================
+
+  /// Persist: Write run records via [RunsPort] and claims via [ClaimsPort]
+  /// when the corresponding optional ports are configured.
+  Future<void> _persist(
+      List<SkillResult> results, SkillContext context) async {
+    await _notifyHooks((hook) => hook.onPersistence(context));
+
+    final runsPort = ports.runs;
+    final claimsPort = ports.claims;
+    if (runsPort == null && claimsPort == null) {
+      return;
+    }
+
+    try {
+      for (final result in results) {
+        if (!result.success) continue;
+
+        if (runsPort != null) {
+          final record = RunRecord(
+            id: context.runId,
+            workspaceId: context.workspaceId,
+            producerId: result.metadata.skillId,
+            producerKind: 'skill',
+            producerVersion: result.metadata.skillVersion,
+            startedAt: result.metadata.startedAt,
+            finishedAt: DateTime.now(),
+            status: result.success ? RunStatus.completed : RunStatus.failed,
+            inputs: context.inputs,
+            claimIds: result.claims.map((c) => c.id).toList(),
+            evidenceRefs: result.evidenceRefs,
+          );
+          await runsPort.writeRun(record);
+        }
+
+        if (claimsPort != null && result.claims.isNotEmpty) {
+          await claimsPort.writeClaims(
+            result.claims,
+            evidenceRefs: result.evidenceRefs,
+          );
+        }
+      }
+    } catch (e) {
+      await _notifyHooks(
+        (hook) => hook.onWarning(context, 'Run/claim persistence failed: $e'),
+      );
+    }
+  }
+
+  // ========================================================================
+  // STEP 7: AGGREGATE
+  // ========================================================================
+
+  /// Aggregate: Combine multiple results into final result.
+  SkillResult _aggregate(List<SkillResult> results) {
+    if (results.isEmpty) {
+      return SkillResult.failure(
+        skillId: 'unknown',
+        error: 'No results to aggregate',
+      );
+    }
+
+    if (results.length == 1) {
+      return results.first;
+    }
+
+    // Combine multiple results
+    return results.first;
+  }
+
+  // ========================================================================
+  // HOOKS
+  // ========================================================================
+
+  /// Notify all hooks with given callback.
+  Future<void> _notifyHooks(
+      Future<void> Function(RuntimeHook hook) callback) async {
+    if (hooks == null || hooks!.isEmpty) return;
+
+    for (final hook in hooks!) {
+      try {
+        await callback(hook);
+      } catch (_) {
+        // Ignore hook errors to not break execution
+      }
+    }
+  }
 }
 
-/// Execution status.
-enum ExecutionStatus {
-  /// Pending execution.
-  pending,
+/// Execution plan for selected skills.
+class ExecutionPlan {
+  final List<String> skillIds;
+  final ExecutionStrategy strategy;
 
-  /// Running.
-  running,
-
-  /// Completed successfully.
-  completed,
-
-  /// Failed.
-  failed,
-
-  /// Cancelled.
-  cancelled,
-}
-
-/// Record of past execution.
-class ExecutionRecord {
-  /// Execution ID.
-  final String executionId;
-
-  /// Skill ID.
-  final String skillId;
-
-  /// Execution status.
-  final ExecutionStatus status;
-
-  /// When execution started.
-  final DateTime startedAt;
-
-  /// When execution completed.
-  final DateTime? completedAt;
-
-  /// Duration.
-  final Duration? duration;
-
-  /// Error message if failed.
-  final String? error;
-
-  const ExecutionRecord({
-    required this.executionId,
-    required this.skillId,
-    required this.status,
-    required this.startedAt,
-    this.completedAt,
-    this.duration,
-    this.error,
+  const ExecutionPlan({
+    required this.skillIds,
+    this.strategy = ExecutionStrategy.sequential,
   });
+}
+
+/// Execution strategy.
+enum ExecutionStrategy {
+  /// Execute skills sequentially.
+  sequential,
+
+  /// Execute skills in parallel.
+  parallel,
+
+  /// Execute with fallback chain.
+  fallback,
 }

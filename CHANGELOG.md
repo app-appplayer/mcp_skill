@@ -1,3 +1,30 @@
+## [0.2.0] - 2026-04-28 - Bundle Subsystem & Multi-Skill Runtime
+
+### Added
+- Bundle subsystem — `BundleLoader`, `BundleValidator`, capability types / composer / verifier, permission enforcer.
+- Multi-skill execution — `Procedure` model with branching, branch merger, circuit breaker, error aggregator.
+- Embedded expression language (lexer / parser / AST / evaluator / function registry) for skill conditionals and templated values.
+- Evaluation subsystem (rubric-based scoring) and FactGraph integration for claim recording.
+- Standard port adapters — `SkillRuntimePortAdapter`, `SkillRegistryPortAdapter` implementing `mcp_bundle` Contract Layer.
+- In-memory `MemorySkillRegistry`.
+
+### Changed
+- Runtime restructured around `SkillRuntime` with context builder, procedure executor, claim extractor.
+- New dependency: `mcp_bundle ^0.3.0`.
+
+### Removed
+- Legacy ports — `fact_graph_port`, `knowledge_port`, `mcp_port` shims (consumers receive capability ports through `skill_ports.dart` now).
+
+---
+
+## [0.1.1] - Bugfix
+
+### Fixed
+- Unified LLM Port types to use mcp_bundle Contract Layer exclusively
+- Updated documentation to reflect Contract Layer architecture
+
+---
+
 ## [0.1.0] - Initial Release
 
 ### Added
@@ -28,9 +55,9 @@
 
 - **Port-Based Architecture**
   - `SkillStoragePort` for skill persistence
-  - `SkillLlmPort` for LLM integration
-  - `SkillMcpPort` for MCP tool calls
-  - `SkillKnowledgePort` for knowledge access
+  - `LlmPort` for LLM integration (from mcp_bundle Contract Layer)
+  - `McpPort` for MCP tool calls
+  - `KnowledgePort` for knowledge access
 
 - **In-Memory Implementations**
   - Complete in-memory storage for testing

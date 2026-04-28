@@ -1,7 +1,32 @@
 /// Skill registry for managing skill definitions.
 library;
 
+import '../bundle/skill_bundle.dart';
 import '../definition/skill.dart';
+
+/// Abstract registry for runtime use.
+///
+/// Provides async, SkillBundle-based access for the SkillRuntime.
+/// This is the interface that runtime components depend on.
+abstract class SkillBundleRegistry {
+  /// List all registered skill bundles.
+  Future<List<SkillBundle>> listSkills({String? workspaceId});
+
+  /// Get a skill bundle by ID.
+  Future<SkillBundle?> getSkill(String skillId);
+
+  /// Register a skill bundle.
+  Future<void> registerSkill(SkillBundle bundle);
+
+  /// Unregister a skill bundle by ID.
+  Future<void> unregisterSkill(String skillId);
+
+  /// Check if a skill is enabled.
+  Future<bool> isEnabled(String skillId, {String? workspaceId});
+
+  /// Enable or disable a skill.
+  Future<void> setEnabled(String skillId, bool enabled, {String? workspaceId});
+}
 
 /// Registry for managing skill definitions.
 class SkillRegistry {

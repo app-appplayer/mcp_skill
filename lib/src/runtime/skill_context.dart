@@ -4,11 +4,47 @@
 /// temporal constraints, inputs, and budget.
 library;
 
+// Import and re-export canonical types from mcp_bundle
+import 'package:mcp_bundle/ports.dart' show Period, ContextBundle;
+
+import '../exceptions/execution_exceptions.dart';
+import 'retry_config.dart';
+
+export 'package:mcp_bundle/ports.dart'
+    show
+        Period,
+        RelativePeriod,
+        AbsolutePeriod,
+        PeriodUnit,
+        DateRange,
+        ContextBundle,
+        ContextEntity,
+        ContextEvent,
+        ContextView,
+        ContextClaim;
+
+export 'retry_config.dart' show RetryConfig, CacheConfig;
+
 /// Context for skill execution.
 ///
 /// Contains all necessary information for executing a skill,
 /// including the request, workspace, temporal constraints, and budget.
 class SkillContext {
+  /// Unique identifier for this context instance.
+  final String contextId;
+
+  /// ID of the skill being executed.
+  final String skillId;
+
+  /// ID of this specific run.
+  final String runId;
+
+  /// Distributed tracing ID for cross-service correlation.
+  final String traceId;
+
+  /// Parent context ID (for nested skills).
+  final String? parentContextId;
+
   /// User request/goal.
   final String request;
 
@@ -36,10 +72,24 @@ class SkillContext {
   /// Budget constraints.
   final ExecutionBudget? budget;
 
+  /// User ID (for user-specific execution).
+  final String? userId;
+
+  /// Retry configuration.
+  final RetryConfig? retryConfig;
+
+  /// Cache configuration hints.
+  final CacheConfig? cacheConfig;
+
   /// Custom metadata.
   final Map<String, dynamic>? metadata;
 
   const SkillContext({
+    required this.contextId,
+    required this.skillId,
+    required this.runId,
+    required this.traceId,
+    this.parentContextId,
     required this.request,
     required this.workspaceId,
     required this.asOf,
@@ -49,11 +99,19 @@ class SkillContext {
     this.inputs = const {},
     this.contextBundle,
     this.budget,
+    this.userId,
+    this.retryConfig,
+    this.cacheConfig,
     this.metadata,
   });
 
   /// Create a copy with updated fields.
   SkillContext copyWith({
+    String? contextId,
+    String? skillId,
+    String? runId,
+    String? traceId,
+    String? parentContextId,
     String? request,
     String? workspaceId,
     DateTime? asOf,
@@ -63,9 +121,17 @@ class SkillContext {
     Map<String, dynamic>? inputs,
     ContextBundle? contextBundle,
     ExecutionBudget? budget,
+    String? userId,
+    RetryConfig? retryConfig,
+    CacheConfig? cacheConfig,
     Map<String, dynamic>? metadata,
   }) {
     return SkillContext(
+      contextId: contextId ?? this.contextId,
+      skillId: skillId ?? this.skillId,
+      runId: runId ?? this.runId,
+      traceId: traceId ?? this.traceId,
+      parentContextId: parentContextId ?? this.parentContextId,
       request: request ?? this.request,
       workspaceId: workspaceId ?? this.workspaceId,
       asOf: asOf ?? this.asOf,
@@ -75,6 +141,9 @@ class SkillContext {
       inputs: inputs ?? this.inputs,
       contextBundle: contextBundle ?? this.contextBundle,
       budget: budget ?? this.budget,
+      userId: userId ?? this.userId,
+      retryConfig: retryConfig ?? this.retryConfig,
+      cacheConfig: cacheConfig ?? this.cacheConfig,
       metadata: metadata ?? this.metadata,
     );
   }
@@ -82,6 +151,11 @@ class SkillContext {
   /// Create from JSON.
   factory SkillContext.fromJson(Map<String, dynamic> json) {
     return SkillContext(
+      contextId: json['contextId'] as String? ?? '',
+      skillId: json['skillId'] as String? ?? '',
+      runId: json['runId'] as String? ?? '',
+      traceId: json['traceId'] as String? ?? '',
+      parentContextId: json['parentContextId'] as String?,
       request: json['request'] as String? ?? '',
       workspaceId: json['workspaceId'] as String? ?? '',
       asOf: json['asOf'] != null
@@ -106,6 +180,11 @@ class SkillContext {
 
   /// Convert to JSON.
   Map<String, dynamic> toJson() => {
+        'contextId': contextId,
+        'skillId': skillId,
+        'runId': runId,
+        'traceId': traceId,
+        if (parentContextId != null) 'parentContextId': parentContextId,
         'request': request,
         'workspaceId': workspaceId,
         'asOf': asOf.toIso8601String(),
@@ -120,7 +199,8 @@ class SkillContext {
 
   @override
   String toString() =>
-      'SkillContext(request: "$request", workspaceId: $workspaceId, asOf: $asOf)';
+      'SkillContext(contextId: $contextId, skillId: $skillId, runId: $runId, '
+      'traceId: $traceId, request: "$request", workspaceId: $workspaceId)';
 }
 
 /// Execution budget constraints.
@@ -213,280 +293,6 @@ class ExecutionBudget {
       'ExecutionBudget(maxTokens: $maxTokens, maxSteps: $maxSteps, maxLlmCalls: $maxLlmCalls)';
 }
 
-/// Time period for filtering.
-class Period {
-  /// Start time.
-  final DateTime start;
-
-  /// End time.
-  final DateTime end;
-
-  const Period({required this.start, required this.end});
-
-  /// Create a period for today.
-  factory Period.today() {
-    final now = DateTime.now();
-    final startOfDay = DateTime(now.year, now.month, now.day);
-    final endOfDay = startOfDay.add(const Duration(days: 1));
-    return Period(start: startOfDay, end: endOfDay);
-  }
-
-  /// Create a period for the last N days.
-  factory Period.lastDays(int days) {
-    final now = DateTime.now();
-    final start = now.subtract(Duration(days: days));
-    return Period(start: start, end: now);
-  }
-
-  /// Create from JSON.
-  factory Period.fromJson(Map<String, dynamic> json) {
-    return Period(
-      start: DateTime.parse(json['start'] as String),
-      end: DateTime.parse(json['end'] as String),
-    );
-  }
-
-  /// Convert to JSON.
-  Map<String, dynamic> toJson() => {
-        'start': start.toIso8601String(),
-        'end': end.toIso8601String(),
-      };
-
-  /// Get duration of period.
-  Duration get duration => end.difference(start);
-
-  /// Check if a timestamp is within this period.
-  bool contains(DateTime timestamp) =>
-      timestamp.isAfter(start) && timestamp.isBefore(end) ||
-      timestamp == start ||
-      timestamp == end;
-
-  @override
-  String toString() => 'Period($start to $end)';
-}
-
-/// Context bundle from FactGraph.
-///
-/// Contains context information retrieved from the FactGraph
-/// for enriching skill execution.
-class ContextBundle {
-  /// Bundle ID.
-  final String id;
-
-  /// Retrieved entities.
-  final List<ContextEntity> entities;
-
-  /// Retrieved events.
-  final List<ContextEvent> events;
-
-  /// Retrieved views/summaries.
-  final List<ContextView> views;
-
-  /// Claims from the context.
-  final List<ContextClaim> claims;
-
-  /// When the bundle was created.
-  final DateTime createdAt;
-
-  /// Total token count estimate.
-  final int? estimatedTokens;
-
-  const ContextBundle({
-    required this.id,
-    this.entities = const [],
-    this.events = const [],
-    this.views = const [],
-    this.claims = const [],
-    required this.createdAt,
-    this.estimatedTokens,
-  });
-
-  /// Create an empty context bundle.
-  factory ContextBundle.empty() {
-    return ContextBundle(
-      id: 'empty',
-      createdAt: DateTime.now(),
-    );
-  }
-
-  /// Create from JSON.
-  factory ContextBundle.fromJson(Map<String, dynamic> json) {
-    return ContextBundle(
-      id: json['id'] as String? ?? '',
-      entities: (json['entities'] as List<dynamic>?)
-              ?.map((e) => ContextEntity.fromJson(e as Map<String, dynamic>))
-              .toList() ??
-          [],
-      events: (json['events'] as List<dynamic>?)
-              ?.map((e) => ContextEvent.fromJson(e as Map<String, dynamic>))
-              .toList() ??
-          [],
-      views: (json['views'] as List<dynamic>?)
-              ?.map((e) => ContextView.fromJson(e as Map<String, dynamic>))
-              .toList() ??
-          [],
-      claims: (json['claims'] as List<dynamic>?)
-              ?.map((e) => ContextClaim.fromJson(e as Map<String, dynamic>))
-              .toList() ??
-          [],
-      createdAt: json['createdAt'] != null
-          ? DateTime.parse(json['createdAt'] as String)
-          : DateTime.now(),
-      estimatedTokens: json['estimatedTokens'] as int?,
-    );
-  }
-
-  /// Convert to JSON.
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        if (entities.isNotEmpty)
-          'entities': entities.map((e) => e.toJson()).toList(),
-        if (events.isNotEmpty)
-          'events': events.map((e) => e.toJson()).toList(),
-        if (views.isNotEmpty) 'views': views.map((e) => e.toJson()).toList(),
-        if (claims.isNotEmpty)
-          'claims': claims.map((e) => e.toJson()).toList(),
-        'createdAt': createdAt.toIso8601String(),
-        if (estimatedTokens != null) 'estimatedTokens': estimatedTokens,
-      };
-
-  /// Check if the bundle is empty.
-  bool get isEmpty =>
-      entities.isEmpty && events.isEmpty && views.isEmpty && claims.isEmpty;
-
-  @override
-  String toString() =>
-      'ContextBundle(id: $id, entities: ${entities.length}, events: ${events.length})';
-}
-
-/// Entity from context.
-class ContextEntity {
-  final String id;
-  final String type;
-  final String name;
-  final Map<String, dynamic> attributes;
-
-  const ContextEntity({
-    required this.id,
-    required this.type,
-    required this.name,
-    this.attributes = const {},
-  });
-
-  factory ContextEntity.fromJson(Map<String, dynamic> json) {
-    return ContextEntity(
-      id: json['id'] as String? ?? '',
-      type: json['type'] as String? ?? '',
-      name: json['name'] as String? ?? '',
-      attributes: json['attributes'] as Map<String, dynamic>? ?? {},
-    );
-  }
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'type': type,
-        'name': name,
-        if (attributes.isNotEmpty) 'attributes': attributes,
-      };
-}
-
-/// Event from context.
-class ContextEvent {
-  final String id;
-  final String type;
-  final DateTime timestamp;
-  final Map<String, dynamic> data;
-
-  const ContextEvent({
-    required this.id,
-    required this.type,
-    required this.timestamp,
-    this.data = const {},
-  });
-
-  factory ContextEvent.fromJson(Map<String, dynamic> json) {
-    return ContextEvent(
-      id: json['id'] as String? ?? '',
-      type: json['type'] as String? ?? '',
-      timestamp: json['timestamp'] != null
-          ? DateTime.parse(json['timestamp'] as String)
-          : DateTime.now(),
-      data: json['data'] as Map<String, dynamic>? ?? {},
-    );
-  }
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'type': type,
-        'timestamp': timestamp.toIso8601String(),
-        if (data.isNotEmpty) 'data': data,
-      };
-}
-
-/// View/summary from context.
-class ContextView {
-  final String id;
-  final String type;
-  final String content;
-  final DateTime asOf;
-
-  const ContextView({
-    required this.id,
-    required this.type,
-    required this.content,
-    required this.asOf,
-  });
-
-  factory ContextView.fromJson(Map<String, dynamic> json) {
-    return ContextView(
-      id: json['id'] as String? ?? '',
-      type: json['type'] as String? ?? '',
-      content: json['content'] as String? ?? '',
-      asOf: json['asOf'] != null
-          ? DateTime.parse(json['asOf'] as String)
-          : DateTime.now(),
-    );
-  }
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'type': type,
-        'content': content,
-        'asOf': asOf.toIso8601String(),
-      };
-}
-
-/// Claim from context.
-class ContextClaim {
-  final String id;
-  final String text;
-  final double confidence;
-  final List<String> evidenceRefs;
-
-  const ContextClaim({
-    required this.id,
-    required this.text,
-    required this.confidence,
-    this.evidenceRefs = const [],
-  });
-
-  factory ContextClaim.fromJson(Map<String, dynamic> json) {
-    return ContextClaim(
-      id: json['id'] as String? ?? '',
-      text: json['text'] as String? ?? '',
-      confidence: (json['confidence'] as num?)?.toDouble() ?? 0.0,
-      evidenceRefs: (json['evidenceRefs'] as List<dynamic>?)?.cast<String>() ?? [],
-    );
-  }
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'text': text,
-        'confidence': confidence,
-        if (evidenceRefs.isNotEmpty) 'evidenceRefs': evidenceRefs,
-      };
-}
-
 /// Budget tracker for monitoring execution resource usage.
 class BudgetTracker {
   final ExecutionBudget budget;
@@ -499,24 +305,86 @@ class BudgetTracker {
 
   BudgetTracker(this.budget);
 
-  /// Track token usage.
+  /// Track token usage (no enforcement — use [consumeTokens] to enforce).
   void trackTokens(int tokens) {
     _tokensUsed += tokens;
   }
 
-  /// Track step execution.
+  /// Track step execution (no enforcement — use [incrementStep] to enforce).
   void trackStep() {
     _stepsExecuted++;
   }
 
-  /// Track LLM call.
+  /// Track LLM call (no enforcement — use [addLlmCall] to enforce).
   void trackLlmCall() {
     _llmCallsMade++;
   }
 
-  /// Track MCP call.
+  /// Track MCP call (no enforcement — use [addMcpCall] to enforce).
   void trackMcpCall() {
     _mcpCallsMade++;
+  }
+
+  /// Consume tokens and enforce the token budget.
+  ///
+  /// Throws [BudgetExceededException] when the resulting total exceeds
+  /// [ExecutionBudget.maxTokens] (ignored when the limit is negative /
+  /// unlimited).
+  void consumeTokens(int tokens) {
+    _tokensUsed += tokens;
+    if (budget.maxTokens >= 0 && _tokensUsed > budget.maxTokens) {
+      throw BudgetExceededException('tokens', budget.maxTokens, _tokensUsed);
+    }
+  }
+
+  /// Increment the step counter and enforce the step budget.
+  ///
+  /// Throws [BudgetExceededException] when the resulting total exceeds
+  /// [ExecutionBudget.maxSteps] (ignored when the limit is negative /
+  /// unlimited).
+  void incrementStep() {
+    _stepsExecuted++;
+    if (budget.maxSteps >= 0 && _stepsExecuted > budget.maxSteps) {
+      throw BudgetExceededException('steps', budget.maxSteps, _stepsExecuted);
+    }
+  }
+
+  /// Record an LLM call and enforce the LLM-call budget.
+  ///
+  /// Throws [BudgetExceededException] when the resulting total exceeds
+  /// [ExecutionBudget.maxLlmCalls] (ignored when the limit is negative /
+  /// unlimited).
+  void addLlmCall() {
+    _llmCallsMade++;
+    if (budget.maxLlmCalls >= 0 && _llmCallsMade > budget.maxLlmCalls) {
+      throw BudgetExceededException(
+          'llm_calls', budget.maxLlmCalls, _llmCallsMade);
+    }
+  }
+
+  /// Record an MCP call and enforce the MCP-call budget.
+  ///
+  /// Throws [BudgetExceededException] when the resulting total exceeds
+  /// [ExecutionBudget.maxMcpCalls] (ignored when the limit is negative /
+  /// unlimited).
+  void addMcpCall() {
+    _mcpCallsMade++;
+    if (budget.maxMcpCalls >= 0 && _mcpCallsMade > budget.maxMcpCalls) {
+      throw BudgetExceededException(
+          'mcp_calls', budget.maxMcpCalls, _mcpCallsMade);
+    }
+  }
+
+  /// Assert that execution has not exceeded the wall-clock duration budget.
+  ///
+  /// Throws [BudgetExceededException] when [elapsed] has surpassed
+  /// [ExecutionBudget.maxDuration].
+  void assertNotExpired() {
+    final elapsedMs = elapsed.inMilliseconds;
+    final maxMs = budget.maxDuration.inMilliseconds;
+    if (elapsedMs > maxMs) {
+      throw BudgetExceededException('duration', maxMs, elapsedMs);
+    }
   }
 
   /// Get current token usage.

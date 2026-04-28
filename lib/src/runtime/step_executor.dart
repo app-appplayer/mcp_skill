@@ -10,7 +10,9 @@ import 'procedure_executor.dart';
 import 'claim_extractor.dart';
 import '../ports/skill_ports.dart';
 import '../ports/llm_port.dart';
-import '../ports/fact_graph_port.dart' as fg;
+import '../evaluation/rubric.dart';
+import '../evaluation/rubric_engine.dart';
+import '../evaluation/measurement_extractor.dart';
 
 /// Executes individual procedure steps.
 class StepExecutor {
@@ -20,18 +22,35 @@ class StepExecutor {
   /// Expression evaluator callback.
   final ExpressionEvaluator? expressionEvaluator;
 
+  /// Rubric evaluation engine.
+  final RubricEvaluationEngine? rubricEngine;
+
+  /// Rubric registry for looking up rubrics.
+  final RubricRegistry? rubricRegistry;
+
   /// Claim extractor.
   late final ClaimExtractor _claimExtractor;
+
+  /// Measurement extractor registry.
+  late final MeasurementExtractorRegistry _extractorRegistry;
 
   StepExecutor({
     required this.ports,
     this.expressionEvaluator,
+    this.rubricEngine,
+    this.rubricRegistry,
     ClaimExtractor? claimExtractor,
+    MeasurementExtractorRegistry? extractorRegistry,
   }) {
     _claimExtractor = claimExtractor ??
         ClaimExtractor(
-          config: const ClaimExtractionConfig(),
           llmPort: ports.llm,
+          workspaceId: 'default',
+        );
+    _extractorRegistry = extractorRegistry ??
+        MeasurementExtractorRegistry(
+          llmPort: ports.llm,
+          retrievalPort: ports.retrieval,
         );
   }
 
@@ -87,7 +106,7 @@ class StepExecutor {
           ?.map((t) => LlmTool(
                 name: t,
                 description: '',
-                inputSchema: {},
+                parameters: {},
               ))
           .toList(),
     );
@@ -97,7 +116,7 @@ class StepExecutor {
     return StepResult(
       stepId: step.id,
       result: response.content,
-      claims: _claimExtractor.extract(response.content),
+      claims: await _claimExtractor.extract(response.content),
     );
   }
 
@@ -129,13 +148,19 @@ class StepExecutor {
     SkillContext context,
     Map<String, StepResult> previousResults,
   ) async {
+    final retrievalPort = ports.retrieval;
+    if (retrievalPort == null) {
+      throw UnsupportedActionException(
+          'retrieve requires RetrievalPort to be configured');
+    }
+
     final query = _interpolate(action.query ?? '', context, previousResults);
     final filters =
         _interpolateMap(action.filters ?? {}, context, previousResults);
 
-    final result = await ports.knowledge.query(
-      action.retrieverRef ?? 'default',
+    final result = await retrievalPort.queryKnowledge(
       query,
+      retrieverId: action.retrieverRef ?? 'default',
       filters: filters,
       maxResults: action.maxResults,
     );
@@ -177,26 +202,28 @@ class StepExecutor {
     SkillContext context,
     Map<String, StepResult> previousResults,
   ) async {
-    // Validate claims against FactGraph
-    final factGraphPort = ports.factGraph;
-    if (factGraphPort == null) {
-      return StepResult(
-        stepId: step.id,
-        result: {'valid': true, 'reason': 'No FactGraph port configured'},
-      );
-    }
-
-    // Get claims from previous steps to validate
+    // Gather candidate claims from previous steps.
     final claimsToValidate = <Claim>[];
     for (final result in previousResults.values) {
       claimsToValidate.addAll(result.claims);
     }
 
-    // Convert to FactGraph claims format
-    final fgClaims = claimsToValidate.map((c) => _toFactGraphClaim(c)).toList();
+    final claimsPort = ports.claims;
+    if (claimsPort == null) {
+      // Graceful fallback — without a claims port, validation passes.
+      return StepResult(
+        stepId: step.id,
+        result: const {
+          'valid': true,
+          'passed': true,
+          'issues': <Map<String, dynamic>>[],
+          'skipped': true,
+        },
+      );
+    }
 
-    final validationResult = await factGraphPort.validateClaims(
-      fgClaims,
+    final report = await claimsPort.validateClaims(
+      claimsToValidate,
       asOf: context.asOf,
       policyVersion: context.policyVersion,
     );
@@ -204,9 +231,9 @@ class StepExecutor {
     return StepResult(
       stepId: step.id,
       result: {
-        'valid': validationResult.passed,
-        'passed': validationResult.passed,
-        'issues': validationResult.issues.map((i) => i.toJson()).toList(),
+        'valid': report.passed,
+        'passed': report.passed,
+        'issues': report.issues,
       },
     );
   }
@@ -218,16 +245,190 @@ class StepExecutor {
     SkillContext context,
     Map<String, StepResult> previousResults,
   ) async {
-    // Rubric evaluation would be handled by RubricEvaluationEngine
-    // For now, return a placeholder
+    final rubricId = action.rubricRef;
+    if (rubricId == null) {
+      return StepResult(
+        stepId: step.id,
+        result: {
+          'evaluated': false,
+          'reason': 'No rubric reference provided',
+        },
+      );
+    }
+
+    // Get rubric from registry
+    final rubric = await _getRubric(rubricId, context);
+    if (rubric == null) {
+      return StepResult(
+        stepId: step.id,
+        result: {
+          'rubricId': rubricId,
+          'evaluated': false,
+          'reason': 'Rubric not found: $rubricId',
+        },
+      );
+    }
+
+    // Build evaluation input
+    final evaluationInput = await _buildEvaluationInput(
+      action.evaluationInput ?? {},
+      context,
+      previousResults,
+      rubric,
+    );
+
+    // Get or create the evaluation engine
+    final engine = rubricEngine ??
+        DefaultRubricEvaluationEngine(extractorRegistry: _extractorRegistry);
+
+    // Execute evaluation
+    final result = await engine.evaluate(
+      rubric,
+      evaluationInput,
+      EvaluationContext(asOf: context.asOf),
+    );
+
+    // Convert to RubricScore for SkillResult
+    final rubricScore = RubricScore(
+      rubricId: result.rubricId,
+      dimensionScores: Map.fromEntries(
+        result.dimensionScores
+            .map((d) => MapEntry(d.dimensionId, d.normalizedScore)),
+      ),
+      totalScore: result.overallScore,
+      grade: result.classification,
+      findings: _generateFindings(result),
+    );
+
     return StepResult(
       stepId: step.id,
-      result: {
-        'rubricId': action.rubricRef,
-        'evaluated': false,
-        'reason': 'Rubric evaluation engine not configured',
-      },
+      result: result.toJson(),
+      claims: [
+        Claim(
+          id: 'rubric_result_${step.id}',
+          workspaceId: context.workspaceId,
+          type: ClaimType.conclusion,
+          text:
+              'Rubric ${rubric.name} evaluation: ${result.classification} (${result.overallScore.toStringAsFixed(1)})',
+          evidenceRefs: const [],
+          confidence: 1.0,
+          metadata: {'rubricScore': rubricScore.toJson()},
+        ),
+      ],
     );
+  }
+
+  /// Get rubric from registry or inline definition.
+  Future<Rubric?> _getRubric(String rubricId, SkillContext context) async {
+    // Try to get from registry
+    if (rubricRegistry != null) {
+      final rubric = await rubricRegistry!.getRubric(rubricId);
+      if (rubric != null) return rubric;
+    }
+
+    // Try to get from context metadata (inline definition)
+    final inlineRubrics =
+        context.metadata?['rubrics'] as Map<String, dynamic>?;
+    if (inlineRubrics != null && inlineRubrics.containsKey(rubricId)) {
+      return Rubric.fromJson(inlineRubrics[rubricId] as Map<String, dynamic>);
+    }
+
+    return null;
+  }
+
+  /// Build evaluation input from step action config.
+  Future<EvaluationInput> _buildEvaluationInput(
+    Map<String, dynamic> config,
+    SkillContext context,
+    Map<String, StepResult> previousResults,
+    Rubric rubric,
+  ) async {
+    // Get artifact reference
+    final artifactId = _interpolate(
+      config['artifactId']?.toString() ??
+          context.inputs['artifactId']?.toString() ??
+          'artifact_${DateTime.now().millisecondsSinceEpoch}',
+      context,
+      previousResults,
+    );
+
+    // Build measurements from config or previous steps
+    final measurements = <String, DimensionMeasurement>{};
+
+    for (final dimension in rubric.dimensions) {
+      // Check if measurement is provided in config
+      if (config.containsKey(dimension.id)) {
+        final value =
+            _interpolate(config[dimension.id].toString(), context, previousResults);
+        measurements[dimension.id] = DimensionMeasurement(
+          dimensionId: dimension.id,
+          value: _parseValue(value, dimension.measurementType),
+          confidence: 1.0,
+          source:
+              MeasurementSource.computed(expression: config[dimension.id].toString()),
+        );
+      } else if (config['measurements'] != null &&
+          (config['measurements'] as Map<String, dynamic>)
+              .containsKey(dimension.id)) {
+        // Measurement provided in measurements map
+        final measurementConfig =
+            (config['measurements'] as Map<String, dynamic>)[dimension.id]
+                as Map<String, dynamic>;
+        measurements[dimension.id] = DimensionMeasurement(
+          dimensionId: dimension.id,
+          value: measurementConfig['value'],
+          confidence:
+              (measurementConfig['confidence'] as num?)?.toDouble() ?? 1.0,
+          source: MeasurementSource.manual(userId: 'system'),
+        );
+      }
+      // If no measurement provided, extraction will be needed
+    }
+
+    return EvaluationInput(
+      artifactId: artifactId,
+      artifactType: config['artifactType']?.toString() ?? 'unknown',
+      measurements: measurements,
+      asOf: context.asOf,
+    );
+  }
+
+  /// Parse value based on measurement type.
+  dynamic _parseValue(String value, String measurementType) {
+    switch (measurementType) {
+      case 'numeric':
+        return double.tryParse(value) ?? 0.0;
+      case 'boolean':
+        return value.toLowerCase() == 'true';
+      case 'categorical':
+        return value;
+      default:
+        return value;
+    }
+  }
+
+  /// Generate findings from evaluation result.
+  List<Finding> _generateFindings(EvaluationResult result) {
+    final findings = <Finding>[];
+
+    for (final score in result.dimensionScores) {
+      if (score.normalizedScore >= 90) {
+        findings.add(Finding(
+          type: 'strength',
+          dimensionId: score.dimensionId,
+          description: '${score.dimensionId} rated ${score.level}',
+        ));
+      } else if (score.normalizedScore < 50) {
+        findings.add(Finding(
+          type: 'weakness',
+          dimensionId: score.dimensionId,
+          description: '${score.dimensionId} needs improvement (${score.level})',
+          impact: (50 - score.normalizedScore) / 100,
+        ));
+      }
+    }
+
+    return findings;
   }
 
   /// Execute parallel action.
@@ -281,17 +482,7 @@ class StepExecutor {
     );
   }
 
-  /// Convert internal Claim to FactGraph Claim.
-  fg.Claim _toFactGraphClaim(Claim claim) {
-    return fg.Claim(
-      id: claim.id,
-      content: claim.text,
-      claimType: claim.type.name,
-      confidence: claim.confidence,
-      evidenceRefs: claim.evidenceRefs,
-      metadata: claim.metadata,
-    );
-  }
+  // Note: _toFactGraphClaim removed - canonical Claim type is used directly.
 
   /// Interpolate template string with context values.
   String _interpolate(
