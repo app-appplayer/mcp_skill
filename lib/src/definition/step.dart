@@ -181,6 +181,37 @@ class StepAction {
   /// Custom configuration.
   final Map<String, dynamic>? config;
 
+  // === CLAIM EXTRACTION (llm) ===
+  /// How an `llm` step extracts claims: `none`, `rules`, `llm` or `hybrid`.
+  final String? extractClaims;
+
+  // === BRANCH ACTION ===
+  /// Cases of a `branch` (`{when, goto}` maps), tried in order.
+  final List<Map<String, dynamic>>? cases;
+
+  /// Step a `branch` continues at when no case matches.
+  final String? defaultTarget;
+
+  // === LOOP ACTION ===
+  /// List expression a `loop` iterates over.
+  final String? over;
+
+  /// Condition a `loop` repeats while truthy.
+  final String? whileCondition;
+
+  /// Name the current element of a `loop` is bound to.
+  final String? loopVariable;
+
+  /// Upper bound on the iterations of a `loop`.
+  final int? maxIterations;
+
+  /// Body of a `loop`, as runtime step maps.
+  final List<Map<String, dynamic>>? steps;
+
+  // === OUTPUT ACTION ===
+  /// Value an `output` action returns (expression or templated text).
+  final String? value;
+
   const StepAction({
     required this.type,
     this.prompt,
@@ -208,6 +239,15 @@ class StepAction {
     this.parallel,
     this.customType,
     this.config,
+    this.extractClaims,
+    this.cases,
+    this.defaultTarget,
+    this.over,
+    this.whileCondition,
+    this.loopVariable,
+    this.maxIterations,
+    this.steps,
+    this.value,
   });
 
   /// Create from JSON.
@@ -242,8 +282,21 @@ class StepAction {
           .toList(),
       customType: json['customType'] as String?,
       config: json['config'] as Map<String, dynamic>?,
+      extractClaims: json['extractClaims'] as String?,
+      cases: _mapList(json['cases']),
+      defaultTarget: json['default'] as String?,
+      over: json['over'] as String?,
+      whileCondition: json['while'] as String?,
+      loopVariable: json['as'] as String?,
+      maxIterations: json['maxIterations'] as int?,
+      steps: _mapList(json['steps']),
+      value: json['value']?.toString(),
     );
   }
+
+  static List<Map<String, dynamic>>? _mapList(dynamic raw) => raw is List
+      ? [for (final e in raw) Map<String, dynamic>.from(e as Map)]
+      : null;
 
   /// Convert to JSON.
   Map<String, dynamic> toJson() => {
@@ -274,6 +327,15 @@ class StepAction {
           'parallel': parallel!.map((e) => e.toJson()).toList(),
         if (customType != null) 'customType': customType,
         if (config != null) 'config': config,
+        if (extractClaims != null) 'extractClaims': extractClaims,
+        if (cases != null) 'cases': cases,
+        if (defaultTarget != null) 'default': defaultTarget,
+        if (over != null) 'over': over,
+        if (whileCondition != null) 'while': whileCondition,
+        if (loopVariable != null) 'as': loopVariable,
+        if (maxIterations != null) 'maxIterations': maxIterations,
+        if (steps != null) 'steps': steps,
+        if (value != null) 'value': value,
       };
 
   @override

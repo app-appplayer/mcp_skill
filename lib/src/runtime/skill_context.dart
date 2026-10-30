@@ -63,6 +63,10 @@ class SkillContext {
   /// Active skills (for routing).
   final List<String>? activeSkills;
 
+  /// The procedure to run in the skill; when null the skill's first
+  /// procedure runs.
+  final String? procedureId;
+
   /// Input values.
   final Map<String, dynamic> inputs;
 
@@ -96,6 +100,7 @@ class SkillContext {
     this.period,
     this.policyVersion,
     this.activeSkills,
+    this.procedureId,
     this.inputs = const {},
     this.contextBundle,
     this.budget,
@@ -118,6 +123,7 @@ class SkillContext {
     Period? period,
     String? policyVersion,
     List<String>? activeSkills,
+    String? procedureId,
     Map<String, dynamic>? inputs,
     ContextBundle? contextBundle,
     ExecutionBudget? budget,
@@ -138,6 +144,7 @@ class SkillContext {
       period: period ?? this.period,
       policyVersion: policyVersion ?? this.policyVersion,
       activeSkills: activeSkills ?? this.activeSkills,
+      procedureId: procedureId ?? this.procedureId,
       inputs: inputs ?? this.inputs,
       contextBundle: contextBundle ?? this.contextBundle,
       budget: budget ?? this.budget,
@@ -166,6 +173,7 @@ class SkillContext {
           : null,
       policyVersion: json['policyVersion'] as String?,
       activeSkills: (json['activeSkills'] as List<dynamic>?)?.cast<String>(),
+      procedureId: json['procedureId'] as String?,
       inputs: json['inputs'] as Map<String, dynamic>? ?? {},
       contextBundle: json['contextBundle'] != null
           ? ContextBundle.fromJson(
@@ -191,6 +199,7 @@ class SkillContext {
         if (period != null) 'period': period!.toJson(),
         if (policyVersion != null) 'policyVersion': policyVersion,
         if (activeSkills != null) 'activeSkills': activeSkills,
+        if (procedureId != null) 'procedureId': procedureId,
         if (inputs.isNotEmpty) 'inputs': inputs,
         if (contextBundle != null) 'contextBundle': contextBundle!.toJson(),
         if (budget != null) 'budget': budget!.toJson(),

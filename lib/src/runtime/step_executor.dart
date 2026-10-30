@@ -6,6 +6,9 @@ library;
 
 import 'skill_context.dart';
 import 'skill_result.dart';
+import '../exceptions/execution_exceptions.dart'
+    show ActionExecutionException, InvalidProcedureException;
+import 'default_expression_evaluator.dart';
 import 'procedure_executor.dart';
 import 'claim_extractor.dart';
 import '../ports/skill_ports.dart';
@@ -19,8 +22,11 @@ class StepExecutor {
   /// Skill ports for external access.
   final SkillPorts ports;
 
-  /// Expression evaluator callback.
+  /// Expression evaluator callback. Without one the package's own
+  /// evaluator is used ([defaultEvaluator]).
   final ExpressionEvaluator? expressionEvaluator;
+
+  ExpressionEvaluator get _eval => expressionEvaluator ?? defaultEvaluator;
 
   /// Rubric evaluation engine.
   final RubricEvaluationEngine? rubricEngine;
@@ -41,11 +47,13 @@ class StepExecutor {
     this.rubricRegistry,
     ClaimExtractor? claimExtractor,
     MeasurementExtractorRegistry? extractorRegistry,
+    ClaimExtractionConfig? claimExtraction,
   }) {
     _claimExtractor = claimExtractor ??
         ClaimExtractor(
           llmPort: ports.llm,
           workspaceId: 'default',
+          config: claimExtraction ?? const ClaimExtractionConfig(),
         );
     _extractorRegistry = extractorRegistry ??
         MeasurementExtractorRegistry(
@@ -64,6 +72,7 @@ class StepExecutor {
 
     switch (action.type) {
       case 'llm':
+      case 'prompt':
         return await _executeLlm(step, action, context, previousResults);
       case 'tool':
         return await _executeTool(step, action, context, previousResults);
@@ -79,6 +88,10 @@ class StepExecutor {
         return await _executeParallel(step, action, context, previousResults);
       case 'procedure':
         return await _executeProcedure(step, action, context, previousResults);
+      case 'branch':
+        return await _executeBranch(step, action, context, previousResults);
+      case 'output':
+        return await _executeOutput(step, action, context, previousResults);
       default:
         throw UnsupportedActionException(action.type);
     }
@@ -91,7 +104,7 @@ class StepExecutor {
     SkillContext context,
     Map<String, StepResult> previousResults,
   ) async {
-    final prompt = _interpolate(action.prompt ?? '', context, previousResults);
+    final prompt = await _render(action.prompt ?? '', context, previousResults);
 
     final request = LlmRequest(
       messages: [
@@ -116,7 +129,34 @@ class StepExecutor {
     return StepResult(
       stepId: step.id,
       result: response.content,
-      claims: await _claimExtractor.extract(response.content),
+      claims: await _extractorFor(step, action).extract(response.content),
+    );
+  }
+
+  /// The claim extractor for [action]: the host's, unless the step names its
+  /// own strategy with `extractClaims` (`none`, `rules`, `llm` or `hybrid`).
+  ClaimExtractor _extractorFor(ProcedureStep step, StepAction action) {
+    final named = action.extractClaims;
+    if (named == null) return _claimExtractor;
+    final strategy = switch (named) {
+      'none' => ClaimExtractionStrategy.none,
+      'rules' => ClaimExtractionStrategy.ruleBased,
+      'llm' => ClaimExtractionStrategy.llmBased,
+      'hybrid' => ClaimExtractionStrategy.hybrid,
+      _ => throw InvalidProcedureException(
+          'extractClaims "$named" is not one of none, rules, llm, hybrid',
+          stepId: step.id,
+        ),
+    };
+    final base = _claimExtractor.config;
+    return ClaimExtractor(
+      llmPort: _claimExtractor.llmPort,
+      workspaceId: _claimExtractor.workspaceId,
+      config: ClaimExtractionConfig(
+        strategy: strategy,
+        minConfidence: base.minConfidence,
+        maxClaims: base.maxClaims,
+      ),
     );
   }
 
@@ -127,12 +167,22 @@ class StepExecutor {
     SkillContext context,
     Map<String, StepResult> previousResults,
   ) async {
-    final args = _interpolateMap(action.args ?? {}, context, previousResults);
+    final args = await _renderMap(action.args ?? {}, context, previousResults);
 
     final result = await ports.mcp.callTool(
       action.toolRef ?? '',
       args,
     );
+
+    // An MCP tool reports its own failure as a value with `isError`; that is
+    // a failed step (bundle spec 03 §3.5.1), so `onFailure` routes it.
+    if (result.isError) {
+      throw ActionExecutionException(
+        'tool',
+        result.errorMessage ?? 'Tool ${action.toolRef} returned an error',
+        stepId: step.id,
+      );
+    }
 
     return StepResult(
       stepId: step.id,
@@ -154,9 +204,9 @@ class StepExecutor {
           'retrieve requires RetrievalPort to be configured');
     }
 
-    final query = _interpolate(action.query ?? '', context, previousResults);
+    final query = await _render(action.query ?? '', context, previousResults);
     final filters =
-        _interpolateMap(action.filters ?? {}, context, previousResults);
+        await _renderMap(action.filters ?? {}, context, previousResults);
 
     final result = await retrievalPort.queryKnowledge(
       query,
@@ -179,11 +229,7 @@ class StepExecutor {
     SkillContext context,
     Map<String, StepResult> previousResults,
   ) async {
-    if (expressionEvaluator == null) {
-      throw UnsupportedActionException('transform requires expressionEvaluator');
-    }
-
-    final result = await expressionEvaluator!(
+    final result = await _eval(
       action.expression ?? '',
       context,
       previousResults,
@@ -344,7 +390,7 @@ class StepExecutor {
     Rubric rubric,
   ) async {
     // Get artifact reference
-    final artifactId = _interpolate(
+    final artifactId = await _render(
       config['artifactId']?.toString() ??
           context.inputs['artifactId']?.toString() ??
           'artifact_${DateTime.now().millisecondsSinceEpoch}',
@@ -359,7 +405,7 @@ class StepExecutor {
       // Check if measurement is provided in config
       if (config.containsKey(dimension.id)) {
         final value =
-            _interpolate(config[dimension.id].toString(), context, previousResults);
+            await _render(config[dimension.id].toString(), context, previousResults);
         measurements[dimension.id] = DimensionMeasurement(
           dimensionId: dimension.id,
           value: _parseValue(value, dimension.measurementType),
@@ -484,62 +530,72 @@ class StepExecutor {
 
   // Note: _toFactGraphClaim removed - canonical Claim type is used directly.
 
-  /// Interpolate template string with context values.
-  String _interpolate(
+  /// Execute a `branch` action: the first case whose `when` is truthy names
+  /// the step to continue at (an expression that fails counts as falsy).
+  Future<StepResult> _executeBranch(
+    ProcedureStep step,
+    StepAction action,
+    SkillContext context,
+    Map<String, StepResult> previousResults,
+  ) async {
+    for (final branchCase in action.cases ?? const <BranchCase>[]) {
+      dynamic matched;
+      try {
+        matched = await _eval(branchCase.when, context, previousResults);
+      } catch (_) {
+        matched = false;
+      }
+      if (isTruthy(matched)) {
+        return StepResult(
+          stepId: step.id,
+          result: {'taken': branchCase.goto},
+          metadata: {'goto': branchCase.goto},
+        );
+      }
+    }
+    final fallback = action.defaultTarget;
+    return StepResult(
+      stepId: step.id,
+      result: {'taken': fallback},
+      metadata: fallback == null ? null : {'goto': fallback},
+    );
+  }
+
+  /// Execute an `output` action: evaluates `value` and ends the procedure.
+  Future<StepResult> _executeOutput(
+    ProcedureStep step,
+    StepAction action,
+    SkillContext context,
+    Map<String, StepResult> previousResults,
+  ) async {
+    final text = action.value;
+    final value = text == null || text.trim().isEmpty
+        ? null
+        : await evaluateValue(text, _eval, context, previousResults);
+    return StepResult(
+      stepId: step.id,
+      result: value,
+      metadata: const {'end': true},
+    );
+  }
+
+  /// Renders `${...}` templates with the expression language (bundle spec 11).
+  Future<String> _render(
     String template,
     SkillContext context,
     Map<String, StepResult> previousResults,
-  ) {
-    var result = template;
+  ) =>
+      renderTemplate(template, _eval, context, previousResults);
 
-    // Replace inputs: ${inputs.xxx}
-    final inputRegex = RegExp(r'\$\{inputs\.(\w+)\}');
-    result = result.replaceAllMapped(inputRegex, (match) {
-      final key = match.group(1)!;
-      return context.inputs[key]?.toString() ?? '';
-    });
-
-    // Replace step results: ${steps.xxx.result}
-    final stepRegex = RegExp(r'\$\{steps\.(\w+)\.result\}');
-    result = result.replaceAllMapped(stepRegex, (match) {
-      final stepId = match.group(1)!;
-      return previousResults[stepId]?.result?.toString() ?? '';
-    });
-
-    // Replace context values: ${context.xxx}
-    final contextRegex = RegExp(r'\$\{context\.(\w+)\}');
-    result = result.replaceAllMapped(contextRegex, (match) {
-      final key = match.group(1)!;
-      switch (key) {
-        case 'request':
-          return context.request;
-        case 'workspaceId':
-          return context.workspaceId;
-        case 'asOf':
-          return context.asOf.toIso8601String();
-        default:
-          return context.metadata?[key]?.toString() ?? '';
-      }
-    });
-
-    return result;
-  }
-
-  /// Interpolate map values.
-  Map<String, dynamic> _interpolateMap(
+  /// Renders the templates in [template] at any depth of maps and lists; a
+  /// string that is exactly one `${...}` keeps the value's type.
+  Future<Map<String, dynamic>> _renderMap(
     Map<String, dynamic> template,
     SkillContext context,
     Map<String, StepResult> previousResults,
-  ) {
-    return template.map((key, value) {
-      if (value is String) {
-        return MapEntry(key, _interpolate(value, context, previousResults));
-      } else if (value is Map<String, dynamic>) {
-        return MapEntry(
-            key, _interpolateMap(value, context, previousResults));
-      }
-      return MapEntry(key, value);
-    });
+  ) async {
+    final rendered = await renderValue(template, _eval, context, previousResults);
+    return Map<String, dynamic>.from(rendered as Map);
   }
 }
 

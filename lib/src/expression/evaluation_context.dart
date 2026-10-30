@@ -1,6 +1,7 @@
 /// Evaluation context for expression language.
 ///
-/// Provides the 9 root objects available during expression evaluation.
+/// Provides the root objects available during expression evaluation: the 9
+/// shared ones and `loop` inside a `loop` step.
 library;
 
 import '../runtime/skill_context.dart';
@@ -59,6 +60,8 @@ class ExpressionEvaluationContext {
       'facts' => facts,
       'claims' => claims,
       'metrics' => metrics,
+      // The scope of a running `loop` step (element and index).
+      'loop' => skillContext?.metadata?['loop'],
       _ => null,
     };
   }
@@ -68,6 +71,8 @@ class ExpressionEvaluationContext {
     final ctx = skillContext;
     if (ctx == null) return null;
     return {
+      // Custom metadata first, so the standard keys below always win.
+      ...?ctx.metadata,
       'contextId': ctx.contextId,
       'skillId': ctx.skillId,
       'runId': ctx.runId,

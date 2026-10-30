@@ -24,6 +24,7 @@ export 'src/executor/execution_context.dart';
 export 'src/bundle/skill_bundle.dart' hide RubricDimension, BundleValidator;
 export 'src/bundle/bundle_loader.dart';
 export 'src/bundle/bundle_validator.dart';
+export 'src/bundle/module_conversion.dart';
 export 'src/bundle/capability_types.dart';
 export 'src/bundle/capability_composer.dart';
 export 'src/bundle/capability_verifier.dart';

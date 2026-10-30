@@ -6,6 +6,7 @@ library;
 import 'dart:convert';
 import 'package:mcp_bundle/ports.dart'
     show LlmPort, LlmRequest, LlmMessage, Claim, ClaimType, ClaimStatus;
+import '../id_generator.dart';
 
 /// Claim extractor with all strategies implemented.
 class ClaimExtractor {
@@ -29,6 +30,8 @@ class ClaimExtractor {
     String? sourceId,
   }) async {
     switch (config.strategy) {
+      case ClaimExtractionStrategy.none:
+        return const <Claim>[];
       case ClaimExtractionStrategy.ruleBased:
         return _extractWithRules(content, sourceId: sourceId);
       case ClaimExtractionStrategy.llmBased:
@@ -364,9 +367,7 @@ Respond with JSON array of refined claims.
   }
 
   String _generateClaimId() {
-    final timestamp = DateTime.now().millisecondsSinceEpoch;
-    final random = timestamp.hashCode.abs() % 100000;
-    return 'claim_${timestamp}_$random';
+    return generateId('claim');
   }
 
   // ========================================================================
@@ -449,6 +450,10 @@ class ClaimExtractionConfig {
 
 /// Claim extraction strategy.
 enum ClaimExtractionStrategy {
+  /// No extraction: the reply is only the step's text. No claims, and no
+  /// extra LLM call.
+  none,
+
   /// Rule-based pattern matching.
   ruleBased,
 

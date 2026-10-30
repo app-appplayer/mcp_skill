@@ -9,6 +9,7 @@ import 'package:mcp_bundle/mcp_bundle.dart' as bundle;
 
 import '../runtime/skill_runtime.dart';
 import '../runtime/skill_context.dart';
+import '../id_generator.dart';
 
 /// Adapter that implements [bundle.SkillRuntimePort] by delegating to a
 /// concrete `mcp_skill` [SkillRuntime].
@@ -29,7 +30,7 @@ class SkillRuntimePortAdapter implements bundle.SkillRuntimePort {
     Map<String, dynamic>? context,
   }) async {
     final now = DateTime.now();
-    final runId = 'run_${now.microsecondsSinceEpoch}';
+    final runId = generateId('run');
 
     final skillContext = SkillContext(
       contextId: 'ctx_$runId',

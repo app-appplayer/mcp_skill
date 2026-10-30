@@ -285,6 +285,7 @@ class ProfileAwareSkillRuntime {
       policyVersion: result.policyVersion,
       ui: result.ui,
       artifacts: result.artifacts,
+      output: result.output,
       metadata: ExecutionMetadata(
         skillId: result.metadata.skillId,
         skillVersion: result.metadata.skillVersion,

@@ -12,6 +12,7 @@ import 'parser.dart';
 import 'evaluation_context.dart';
 import 'function_registry.dart';
 import 'expression_exception.dart';
+import '../runtime/skill_result.dart' show StepResult;
 
 /// Execution limits for expression evaluation security.
 class ExecutionLimits {
@@ -304,6 +305,17 @@ class SkillExpressionEvaluator {
   dynamic _getProperty(dynamic obj, String property) {
     if (obj is Map) return obj[property];
     if (obj is StepResultAccessor) return obj.getProperty(property);
+    if (obj is StepResult) {
+      return switch (property) {
+        'stepId' => obj.stepId,
+        'result' => obj.result,
+        'claims' => obj.claims,
+        'evidenceRefs' => obj.evidenceRefs,
+        'toolCalled' => obj.toolCalled,
+        'metadata' => obj.metadata,
+        _ => null,
+      };
+    }
     return null;
   }
 

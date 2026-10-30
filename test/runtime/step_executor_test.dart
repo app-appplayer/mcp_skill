@@ -241,21 +241,19 @@ void main() {
         expect(result.result, equals('transformed: input.data | uppercase'));
       });
 
-      test('throws when no expression evaluator configured', () {
+      test('uses the built-in evaluator when none is configured', () async {
         const step = ProcedureStep(
           id: 'step-transform',
           order: 1,
           name: 'Transform Step',
           action: StepAction(
             type: 'transform',
-            expression: 'something',
+            expression: '1 + 2',
           ),
         );
 
-        expect(
-          () => executor.execute(step, _makeContext(), {}),
-          throwsA(isA<UnsupportedActionException>()),
-        );
+        final result = await executor.execute(step, _makeContext(), {});
+        expect(result.result, equals(3));
       });
     });
 

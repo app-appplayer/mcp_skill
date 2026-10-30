@@ -8,6 +8,7 @@ A typed skill definition and execution runtime for AI capabilities — JSON-Sche
 
 - **Definition** — `Skill`, `Parameter`, `Step`, `Procedure` models.
 - **Bundle** — `SkillBundle` packaging with loader, validator, capability composition, capability verifier, permission enforcer.
+- **Module conversion** — `skillBundleFromModule` turns a bundle skill module into a runnable skill bundle and refuses, with the procedure and step named, any shape the runtime does not execute. Step types: `prompt`, `tool`, `retrieve`, `validate`, `transform`, `branch`, `loop` (bounded) and `output`.
 - **Registry** — `SkillRegistry` and an in-memory implementation.
 - **Runtime** — `SkillRuntime` with context builder, branch merger, circuit breaker, error aggregator, claim extractor, procedure executor.
 - **Multi-skill** — chained execution and dependency resolution across skills.

@@ -13,6 +13,7 @@ import '../exceptions/load_exceptions.dart';
 import 'skill_router.dart';
 import 'skill_context.dart';
 import 'skill_result.dart';
+import 'claim_extractor.dart' show ClaimExtractionConfig, ClaimExtractionStrategy;
 import 'procedure_executor.dart';
 import 'runtime_hooks.dart';
 
@@ -39,11 +40,18 @@ class SkillRuntime {
   /// Hooks for observability (optional).
   final List<RuntimeHook>? hooks;
 
+  /// How `llm` steps extract claims from a reply. Without it the strategy is
+  /// `hybrid`; a host that uses the reply as plain text sets
+  /// [ClaimExtractionStrategy.none], which also avoids the extra LLM call. A
+  /// step can still name its own with `extractClaims`.
+  final ClaimExtractionConfig? claimExtraction;
+
   SkillRuntime({
     required this.registry,
     required this.ports,
     this.router,
     this.hooks,
+    this.claimExtraction,
   });
 
   /// Execute a skill based on context.
@@ -94,14 +102,16 @@ class SkillRuntime {
       throw SkillNotFoundException(skillId);
     }
 
-    final defProc = bundle.procedures.firstOrNull;
+    final defProc = bundle.procedures
+        .where((p) => p.id == procedureId)
+        .firstOrNull;
     if (defProc == null) {
       throw ProcedureNotFoundException(skillId, procedureId);
     }
 
     // Convert definition Procedure to runtime Procedure
     final procedure = Procedure.fromJson(defProc.toJson());
-    final executor = ProcedureExecutor(ports: ports);
+    final executor = ProcedureExecutor(ports: ports, claimExtraction: claimExtraction);
     return await executor.execute(procedure, context);
   }
 
@@ -327,17 +337,23 @@ class SkillRuntime {
       );
     }
 
-    final defProc = bundle.procedures.firstOrNull;
+    // The run names the procedure it wants; without one the first runs.
+    final wanted = context.procedureId;
+    final defProc = wanted == null
+        ? bundle.procedures.firstOrNull
+        : bundle.procedures.where((p) => p.id == wanted).firstOrNull;
     if (defProc == null) {
       return SkillResult.failure(
         skillId: skillId,
-        error: 'No procedures found in skill',
+        error: wanted == null
+            ? 'No procedures found in skill'
+            : 'Procedure $wanted not found in skill $skillId',
       );
     }
 
     try {
       final procedure = Procedure.fromJson(defProc.toJson());
-      final executor = ProcedureExecutor(ports: ports);
+      final executor = ProcedureExecutor(ports: ports, claimExtraction: claimExtraction);
       return await executor.execute(procedure, context);
     } catch (e, stackTrace) {
       await _notifyHooks((hook) => hook.onError(context, e, stackTrace));

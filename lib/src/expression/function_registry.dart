@@ -5,6 +5,8 @@ library;
 
 import 'dart:math' as math;
 
+import 'package:mcp_bundle/mcp_bundle.dart' show parseJsonValue;
+
 import 'expression_exception.dart';
 
 /// Type for expression functions.
@@ -95,6 +97,14 @@ class FunctionRegistry {
 
     register('split', (args) {
       return (args[0]?.toString() ?? '').split(args[1]?.toString() ?? ',');
+    });
+
+    register('parseJson', (args) {
+      try {
+        return parseJsonValue(args.firstOrNull);
+      } on FormatException catch (e) {
+        throw EvaluationException(e.message);
+      }
     });
 
     register('join', (args) {

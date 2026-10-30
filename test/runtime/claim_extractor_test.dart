@@ -29,9 +29,26 @@ void main() {
     });
   });
 
+  group('ClaimExtractionStrategy.none', () {
+    test('extracts nothing and makes no LLM call', () async {
+      final llm = MockLlmPort();
+      final extractor = ClaimExtractor(
+        llmPort: llm,
+        workspaceId: 'w',
+        config:
+            const ClaimExtractionConfig(strategy: ClaimExtractionStrategy.none),
+      );
+      expect(await extractor.extract('Revenue grew 12% in Q3. It is certain.'),
+          isEmpty);
+      expect(llm.completeCalls, isEmpty);
+    });
+  });
+
   group('ClaimExtractionStrategy', () {
-    test('has three values', () {
-      expect(ClaimExtractionStrategy.values.length, equals(3));
+    test('has four values: none and the three strategies', () {
+      expect(ClaimExtractionStrategy.values.length, equals(4));
+      expect(ClaimExtractionStrategy.values,
+          contains(ClaimExtractionStrategy.none));
       expect(ClaimExtractionStrategy.values,
           contains(ClaimExtractionStrategy.ruleBased));
       expect(ClaimExtractionStrategy.values,

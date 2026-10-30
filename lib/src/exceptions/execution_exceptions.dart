@@ -19,6 +19,33 @@ class SkillExecutionException extends SkillException {
         );
 }
 
+/// A procedure whose flow cannot be followed: a `next` / `onError` / `goto`
+/// that names an unknown or an earlier step, a malformed `loop`, or a shape
+/// the runtime does not execute. It is raised, never worked around, so a
+/// procedure is never run in a different order than it was written.
+class InvalidProcedureException extends SkillExecutionException {
+  /// The procedure that is invalid, when known.
+  final String? procedureId;
+
+  /// The step that makes it invalid, when known.
+  final String? stepId;
+
+  InvalidProcedureException(
+    String message, {
+    this.procedureId,
+    this.stepId,
+  }) : super(
+          message,
+          path: [
+            if (procedureId != null) 'procedures[$procedureId]',
+            if (stepId != null) 'steps[$stepId]',
+          ].join('.'),
+        );
+
+  @override
+  String get code => 'INVALID_PROCEDURE';
+}
+
 /// Step execution failure.
 class StepExecutionException extends SkillExecutionException {
   /// The step ID that failed.
