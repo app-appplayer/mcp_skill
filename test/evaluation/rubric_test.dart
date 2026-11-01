@@ -512,7 +512,8 @@ void main() {
         ),
       );
       expect(result.toString(), contains('r1'));
-      expect(result.toString(), contains('75.0'));
+      // A whole double prints as `75.0` on the VM and as `75` in JavaScript.
+      expect(result.toString(), matches(r'75(\.0)?'));
       expect(result.toString(), contains('good'));
     });
   });
@@ -566,7 +567,8 @@ void main() {
         level: 'good',
       );
       expect(score.toString(), contains('dx'));
-      expect(score.toString(), contains('77.0'));
+      // A whole double prints as `77.0` on the VM and as `77` in JavaScript.
+      expect(score.toString(), matches(r'normalized: 77(\.0)?,'));
       expect(score.toString(), contains('38.5'));
     });
   });

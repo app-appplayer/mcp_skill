@@ -531,7 +531,8 @@ void main() {
 
       expect(str, contains('RubricScore'));
       expect(str, contains('rubric-1'));
-      expect(str, contains('85.0'));
+      // A whole double prints as `85.0` on the VM and as `85` in JavaScript.
+      expect(str, matches(r'totalScore: 85(\.0)?,'));
       expect(str, contains('A'));
     });
   });

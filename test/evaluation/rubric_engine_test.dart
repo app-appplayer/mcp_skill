@@ -785,8 +785,9 @@ void main() {
         final result2 =
             await cachedEngine.evaluate(rubric, input, futureContext);
 
-        // result2 should be freshly computed (different evaluatedAt)
-        expect(result2.evaluatedAt.isAfter(result1.evaluatedAt), isTrue);
+        // result2 is computed again, not the cached object. The clock is not
+        // compared: the web clock ticks only every millisecond.
+        expect(identical(result2, result1), isFalse);
       });
     });
   });
